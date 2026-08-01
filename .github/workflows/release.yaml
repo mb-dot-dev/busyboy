@@ -1,0 +1,32 @@
+name: Publish
+run-name: Publish Package
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Set version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          uv version "$VERSION"
+
+      - name: Build package
+        run: |
+          uv build
+      
+      - name: Publish package
+        run: uv publish
