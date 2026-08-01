@@ -8,7 +8,7 @@ from typing import Any, cast
 import click
 from pydantic import ValidationError
 
-from busyboy import bar, exceptions
+from busyboy import bar, exceptions, git, github, watch
 from busyboy.config import ConfigError, load_config
 
 
@@ -149,3 +149,68 @@ def clear(
     _configure_logging(verbose=verbose)
     config = load_config(host=host, token=token)
     bar.clear(config)
+
+
+def _parse_repo(value: str) -> github.Repo:
+    """Split an explicit --repo into owner and name."""
+    owner, separator, name = value.partition("/")
+    if not (owner and separator and name) or "/" in name:
+        raise click.BadParameter("expected owner/name", param_hint="--repo")
+    return github.Repo(owner=owner, name=name)
+
+
+@main.group()
+def gh() -> None:
+    """Show GitHub information on the bar."""
+
+
+@gh.command()
+@click.argument("workflow_reference", metavar="WORKFLOW")
+@click.option(
+    "--branch",
+    default=None,
+    help="Branch to watch. Defaults to the current checkout's branch.",
+)
+@click.option(
+    "--repo",
+    "repo_option",
+    default=None,
+    help="Repository as owner/name. Defaults to origin's.",
+)
+@click.option(
+    "--interval",
+    type=click.IntRange(min=1),
+    default=watch.DEFAULT_INTERVAL_SECONDS,
+    show_default=True,
+    help="Seconds between polls.",
+)
+@_connection_options
+@_handle_errors
+def workflow(
+    workflow_reference: str,
+    branch: str | None,
+    repo_option: str | None,
+    interval: int,
+    host: str | None,
+    token: str | None,
+    verbose: bool,
+) -> None:
+    """
+    Watch a GitHub Actions workflow on the bar until Ctrl+C.
+
+    WORKFLOW is a workflow id, filename, or display name.
+    """
+    _configure_logging(verbose=verbose)
+    config = load_config(host=host, token=token)
+    github_token = github.resolve_token()
+    if repo_option:
+        repo = _parse_repo(repo_option)
+    else:
+        owner, name = git.origin_repo()
+        repo = github.Repo(owner=owner, name=name)
+    target = watch.Target(
+        repo=repo,
+        branch=branch or git.current_branch(),
+        workflow_id=github.resolve_workflow(github_token, repo, workflow_reference).id,
+    )
+    watch.watch(config, github_token, target, interval=interval)

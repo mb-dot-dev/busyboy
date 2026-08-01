@@ -7,7 +7,7 @@ from click.testing import CliRunner
 import pytest
 import responses
 
-from busyboy import cli
+from busyboy import cli, exceptions, github
 
 ENV = {"BUSYBOY_HOST": "10.0.4.20", "BUSYBOY_TOKEN": "testtoken"}
 
@@ -145,3 +145,131 @@ def test_verbose_on_a_successful_draw_still_exits_zero(recorder):
     result = CliRunner().invoke(cli.main, ["text", "hi", "--verbose"], env=ENV)
 
     assert result.exit_code == 0
+
+
+GITHUB_RUNS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/actions/workflows/42/runs"
+GITHUB_PULLS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/pulls"
+GITHUB_WORKFLOWS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/actions/workflows"
+UPLOAD_URL_PATTERN = re.compile(r"^http://[^/]+/api/assets/upload")
+
+
+@pytest.fixture
+def github_bar(monkeypatch):
+    """Register a whole happy-path watch: token, git, GitHub, and the bar."""
+    monkeypatch.setattr(cli.github, "resolve_token", lambda: "gho_test")
+    monkeypatch.setattr(cli.git, "current_branch", lambda: "feature/x")
+    monkeypatch.setattr(cli.git, "origin_repo", lambda: ("mb-dot-dev", "busyboy"))
+    responses.add(
+        responses.GET,
+        GITHUB_WORKFLOWS_URL,
+        json={"workflows": [{"id": 42, "name": "CI", "path": ".github/workflows/main.yaml"}]},
+    )
+    responses.add(
+        responses.GET,
+        GITHUB_RUNS_URL,
+        json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
+    )
+    responses.add(responses.GET, GITHUB_PULLS_URL, json=[{"number": 12}])
+    responses.add(responses.POST, UPLOAD_URL_PATTERN, json={"result": "ok"})
+    responses.add(responses.POST, DRAW_URL_PATTERN, json={"result": "ok"})
+    responses.add(responses.DELETE, DRAW_URL_PATTERN, json={"result": "ok"})
+
+
+def stop_after_one_tick(monkeypatch):
+    """Make the watch loop's first sleep behave like Ctrl+C."""
+
+    def sleep(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.watch.time, "sleep", sleep)
+
+
+@responses.activate
+def test_watching_a_workflow_draws_and_exits_cleanly(github_bar, monkeypatch):
+    stop_after_one_tick(monkeypatch)
+
+    result = CliRunner().invoke(cli.main, ["gh", "workflow", "CI"], env=ENV)
+
+    assert result.exit_code == 0
+    assert result.output == ""
+    draws = [
+        call for call in responses.calls if call.request.method == "POST" and "display/draw" in (call.request.url or "")
+    ]
+    assert len(draws) == 1
+    assert draws[0].request.body is not None
+    body = json.loads(draws[0].request.body)
+    elements = {element["id"]: element for element in body["elements"]}
+    assert elements["repo"]["text"] == "mb-dot-dev/busyboy"
+    assert elements["ref"]["text"] == "#12"
+    assert elements["icon"]["path"] == "success.png"
+
+
+@responses.activate
+def test_an_explicit_repo_and_branch_override_detection(github_bar, monkeypatch):
+    stop_after_one_tick(monkeypatch)
+
+    def fail():
+        raise AssertionError("git must not be consulted when both are given")
+
+    monkeypatch.setattr(cli.git, "current_branch", fail)
+    monkeypatch.setattr(cli.git, "origin_repo", fail)
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["gh", "workflow", "CI", "--repo", "mb-dot-dev/busyboy", "--branch", "feature/x"],
+        env=ENV,
+    )
+
+    assert result.exit_code == 0
+
+
+def test_a_malformed_repo_is_a_usage_error():
+    result = CliRunner().invoke(cli.main, ["gh", "workflow", "CI", "--repo", "busyboy"], env=ENV)
+
+    assert result.exit_code == 2
+    assert "owner/name" in result.stderr
+
+
+@responses.activate
+def test_a_missing_token_exits_one_with_one_line(monkeypatch):
+    def no_token():
+        raise exceptions.GitHubError(github.NO_TOKEN_MESSAGE)
+
+    monkeypatch.setattr(cli.github, "resolve_token", no_token)
+
+    result = CliRunner().invoke(cli.main, ["gh", "workflow", "CI"], env=ENV)
+
+    assert result.exit_code == 1
+    assert "GITHUB_TOKEN" in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1
+
+
+@responses.activate
+def test_an_unknown_workflow_exits_one(monkeypatch):
+    monkeypatch.setattr(cli.github, "resolve_token", lambda: "gho_test")
+    monkeypatch.setattr(cli.git, "current_branch", lambda: "feature/x")
+    monkeypatch.setattr(cli.git, "origin_repo", lambda: ("mb-dot-dev", "busyboy"))
+    responses.add(
+        responses.GET,
+        GITHUB_WORKFLOWS_URL,
+        json={"workflows": [{"id": 42, "name": "CI", "path": ".github/workflows/main.yaml"}]},
+    )
+
+    result = CliRunner().invoke(cli.main, ["gh", "workflow", "Nope"], env=ENV)
+
+    assert result.exit_code == 1
+    assert "CI" in result.stderr
+
+
+def test_a_git_failure_exits_one(monkeypatch):
+    monkeypatch.setattr(cli.github, "resolve_token", lambda: "gho_test")
+
+    def not_a_repo():
+        raise exceptions.GitError("fatal: not a git repository")
+
+    monkeypatch.setattr(cli.git, "origin_repo", not_a_repo)
+
+    result = CliRunner().invoke(cli.main, ["gh", "workflow", "CI"], env=ENV)
+
+    assert result.exit_code == 1
+    assert "not a git repository" in result.stderr
