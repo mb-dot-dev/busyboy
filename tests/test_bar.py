@@ -69,6 +69,14 @@ def test_colour_and_timeout_are_sent_when_given():
     assert element["timeout"] == 30
 
 
+def test_a_colour_with_alpha_keeps_its_alpha_channel():
+    element = element_of(bar.build_text_payload("hi", color="#FF000080"))
+    assert element["color"] == "#FF000080"
+
+    element = element_of(bar.build_text_payload("hi", color="#F008"))
+    assert element["color"] == "#FF000088"
+
+
 def test_scrolling_can_be_switched_off():
     element = element_of(bar.build_text_payload("hi", scroll_rate=0))
 
@@ -83,6 +91,11 @@ def test_a_negative_timeout_is_rejected():
 def test_an_unrecognised_colour_is_rejected():
     with pytest.raises(ValidationError):
         bar.build_text_payload("hi", color="definitely-not-a-colour")
+
+
+def test_non_ascii_text_is_rejected():
+    with pytest.raises(ValidationError):
+        bar.build_text_payload("héllo")
 
 
 @responses.activate

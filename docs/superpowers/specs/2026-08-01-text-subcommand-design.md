@@ -3,6 +3,10 @@
 **Date:** 2026-08-01
 **Branch:** `feat/text-subcommand`
 
+> **Superseded in part** by `2026-08-01-replace-busylib-with-requests-design.md` — the CLI contract
+> described below (flags, exit codes, silent-success behavior) still applies. The architecture, transport,
+> and testing sections describe the old busylib-based implementation and no longer match the code.
+
 ## Goal
 
 Give busyboy its first real capability: put a short string on the BUSY Bar's front

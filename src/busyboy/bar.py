@@ -35,8 +35,9 @@ DEFAULT_TEXT_Y = 2
 
 DISPLAY_DRAW_PATH = "/api/display/draw"
 
-# Matches busylib's previous defaults: an overall 10s timeout with a 5s cap on
-# establishing the connection.
+# Matches busylib's previous defaults: a 5s cap on establishing the
+# connection, and a 10s cap on each individual socket read (not an
+# overall request budget — retries can each take up to 15s).
 REQUEST_TIMEOUT = (5, 10)
 MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 0.25
@@ -57,7 +58,7 @@ class TextElement(BaseModel):
 
     id: str
     type: Literal["text"] = "text"
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, pattern=r"^[\x20-\x7E]+$")
     font: DisplayFontName
     color: str | None = Field(default=None, pattern=r"^#[0-9A-F]{8}$")
     timeout: int | None = Field(default=None, ge=0)

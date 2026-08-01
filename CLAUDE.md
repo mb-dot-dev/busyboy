@@ -50,7 +50,7 @@ knows nothing about argv or the environment, and `cli.py` holds no BUSY Bar payl
   Do not put logic here.
 - Tests live in `tests/`, one module per source module.
 - Coverage config (`[tool.coverage.*]` in `pyproject.toml`) requires 75% coverage and measures branches over
-  `src`, excluding `if TYPE_CHECKING:` blocks. It currently sits around 95%.
+  `src`, excluding `if TYPE_CHECKING:` blocks. It currently sits around 92%.
 - Ruff is configured with a 120-char line length, double quotes, PEP 257 docstring convention, and isort settings
   that force sorting within sections and split on trailing commas.
 
