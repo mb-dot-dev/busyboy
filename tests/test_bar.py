@@ -1,7 +1,8 @@
 """Tests for BUSY Bar payload construction and delivery."""
 
 import json
-from urllib.parse import urlparse
+import struct
+from urllib.parse import parse_qs, urlparse
 
 from pydantic import ValidationError
 import pytest
@@ -178,3 +179,147 @@ def test_a_non_transient_request_error_is_not_retried(config, monkeypatch):
         bar.draw_text(config, payload)
 
     assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_a_request_reports_the_path_it_actually_used(config):
+    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"error": "nope"}, status=401)
+
+    with pytest.raises(exceptions.BarAPIError) as caught:
+        bar._request(config, "POST", "/api/assets/upload", data=b"x", content_type="application/octet-stream")
+
+    assert caught.value.path == "/api/assets/upload"
+
+
+@responses.activate
+def test_a_request_sends_a_raw_body_with_its_content_type(config):
+    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"result": "ok"}, status=200)
+
+    bar._request(config, "POST", "/api/assets/upload", data=b"\x89PNG", content_type="application/octet-stream")
+
+    request = responses.calls[0].request
+    assert request.body == b"\x89PNG"
+    assert request.headers["Content-Type"] == "application/octet-stream"
+
+
+def test_every_icon_ships_as_a_12x12_rgba_png():
+    for icon in bar.ICON_NAMES:
+        data = bar.icon_bytes(icon)
+        assert data[:8] == b"\x89PNG\r\n\x1a\n"
+        width, height, depth, colour_type = struct.unpack(">IIBB", data[16:26])
+        assert (width, height, depth, colour_type) == (12, 12, 8, 6)
+
+
+def elements_by_id(payload):
+    """Index a payload's elements by their stable element id."""
+    return {element["id"]: element for element in payload.model_dump(exclude_none=True)["elements"]}
+
+
+def test_image_element_accepts_a_legitimate_icon_filename():
+    element = bar.ImageElement(id="icon", path="success.png")
+    assert element.path == "success.png"
+
+
+def test_image_element_rejects_a_path_traversal_style_path():
+    with pytest.raises(ValidationError):
+        bar.ImageElement(id="icon", path="../../etc/passwd")
+
+
+def test_the_workflow_payload_carries_two_rows_and_an_icon():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    )
+
+    assert set(elements) == {"repo", "ref", "icon"}
+    assert elements["repo"]["text"] == "mb-dot-dev/busyboy"
+    assert elements["ref"]["text"] == "#12"
+    assert elements["icon"]["type"] == "image"
+    assert elements["icon"]["path"] == "success.png"
+
+
+def test_the_two_rows_share_a_text_column_beside_the_icon():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/busyboy", ref_label="main", icon="pending")
+    )
+
+    for row in (elements["repo"], elements["ref"]):
+        assert row["x"] == bar.TEXT_X
+        assert row["width"] == bar.TEXT_WIDTH
+        assert row["display"] == "front"
+        assert row["font"] == bar.ROW_FONT
+    assert elements["repo"]["y"] == bar.ROW_ONE_Y
+    assert elements["ref"]["y"] == bar.ROW_TWO_Y
+    assert elements["icon"]["x"] == bar.ICON_X
+    assert elements["icon"]["y"] == bar.ICON_Y
+
+
+def test_the_icon_and_text_column_fit_the_front_display():
+    assert bar.ICON_X + bar.ICON_SIZE <= bar.TEXT_X
+    assert bar.TEXT_X + bar.TEXT_WIDTH == bar.FRONT_DISPLAY_WIDTH
+
+
+def test_workflow_element_ids_are_stable_so_a_redraw_replaces():
+    first = elements_by_id(bar.build_workflow_payload(repo_label="a/b", ref_label="#1", icon="success"))
+    second = elements_by_id(bar.build_workflow_payload(repo_label="c/d", ref_label="#2", icon="failure"))
+
+    assert set(first) == set(second)
+
+
+def test_a_non_ascii_repo_label_is_sanitized_rather_than_rejected():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/büsyboy", ref_label="#12", icon="success")
+    )
+
+    assert elements["repo"]["text"] == "mb-dot-dev/b?syboy"
+
+
+def test_a_non_ascii_ref_label_is_sanitized_rather_than_rejected():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/busyboy", ref_label="feature/café", icon="success")
+    )
+
+    assert elements["ref"]["text"] == "feature/caf?"
+
+
+def test_a_label_that_is_entirely_non_ascii_is_still_a_valid_non_empty_payload():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/busyboy", ref_label="日本語", icon="success")
+    )
+
+    assert elements["ref"]["text"] == "???"
+
+
+def test_a_pure_ascii_label_passes_through_unchanged():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/busyboy", ref_label="feature/x", icon="success")
+    )
+
+    assert elements["repo"]["text"] == "mb-dot-dev/busyboy"
+    assert elements["ref"]["text"] == "feature/x"
+
+
+@responses.activate
+def test_uploading_icons_posts_every_asset_scoped_to_the_application(config):
+    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"result": "ok"}, status=200)
+
+    bar.upload_icons(config)
+
+    assert len(responses.calls) == len(bar.ICON_NAMES)
+    uploaded = set()
+    for call in responses.calls:
+        assert call.request.url is not None
+        query = parse_qs(urlparse(call.request.url).query)
+        assert query["application_name"] == ["busyboy"]
+        assert call.request.headers["Content-Type"] == "application/octet-stream"
+        assert call.request.body is not None
+        assert call.request.body[:8] == b"\x89PNG\r\n\x1a\n"
+        uploaded.add(query["file"][0])
+    assert uploaded == {f"{icon}.png" for icon in bar.ICON_NAMES}
+
+
+@responses.activate
+def test_a_failed_icon_upload_raises(config):
+    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"error": "nope"}, status=401)
+
+    with pytest.raises(exceptions.BarError):
+        bar.upload_icons(config)

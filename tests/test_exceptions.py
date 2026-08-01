@@ -42,3 +42,19 @@ def test_bar_request_error_message_includes_method_path_and_attempts():
     assert "POST /api/display/draw" in message
     assert "attempts=3" in message
     assert "connection refused" in message
+
+
+def test_every_expected_failure_shares_one_base():
+    assert issubclass(exceptions.BarError, exceptions.BusyboyError)
+    assert issubclass(exceptions.GitError, exceptions.BusyboyError)
+    assert issubclass(exceptions.GitHubError, exceptions.BusyboyError)
+
+
+def test_github_auth_and_transient_failures_are_distinguishable():
+    assert issubclass(exceptions.GitHubAuthError, exceptions.GitHubError)
+    assert issubclass(exceptions.GitHubTransientError, exceptions.GitHubError)
+    assert not issubclass(exceptions.GitHubAuthError, exceptions.GitHubTransientError)
+
+
+def test_a_non_bar_failure_formats_as_its_message():
+    assert exceptions.format_delivery_error(exceptions.GitError("no origin remote")) == "no origin remote"

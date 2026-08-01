@@ -8,7 +8,7 @@ from typing import Any, cast
 import click
 from pydantic import ValidationError
 
-from busyboy import bar, exceptions
+from busyboy import bar, exceptions, git, github, watch
 from busyboy.config import ConfigError, load_config
 
 
@@ -50,7 +50,7 @@ def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
                 f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}" for detail in error.errors()
             )
             raise click.ClickException(f"Invalid value: {details}") from error
-        except exceptions.BarError as error:
+        except exceptions.BusyboyError as error:
             if verbose:
                 raise
             message = exceptions.format_delivery_error(error)
@@ -149,3 +149,87 @@ def clear(
     _configure_logging(verbose=verbose)
     config = load_config(host=host, token=token)
     bar.clear(config)
+
+
+def _parse_repo(
+    context: click.Context,
+    parameter: click.Parameter,
+    value: str | None,
+) -> github.Repo | None:
+    """
+    Split an explicit --repo into owner and name, or pass None through.
+
+    `context` and `parameter` go unused; Click passes all three to every
+    parameter callback.
+
+    This is a Click parameter callback rather than a plain helper so it runs
+    while Click parses the command line, before the body resolves a GitHub
+    token. A malformed option is a usage error whatever the environment; if it
+    were validated in the body instead, a developer with no gh login would get
+    exit 1 about a missing token rather than exit 2 about the option they
+    actually got wrong.
+    """
+    if value is None:
+        return None
+    owner, separator, name = value.partition("/")
+    if not (owner and separator and name) or "/" in name:
+        raise click.BadParameter("expected owner/name", param_hint="--repo")
+    return github.Repo(owner=owner, name=name)
+
+
+@main.group()
+def gh() -> None:
+    """Show GitHub information on the bar."""
+
+
+@gh.command()
+@click.argument("workflow_reference", metavar="WORKFLOW")
+@click.option(
+    "--branch",
+    default=None,
+    help="Branch to watch. Defaults to the current checkout's branch.",
+)
+@click.option(
+    "--repo",
+    "repo_option",
+    default=None,
+    callback=_parse_repo,
+    help="Repository as owner/name. Defaults to origin's.",
+)
+@click.option(
+    "--interval",
+    type=click.IntRange(min=1),
+    default=watch.DEFAULT_INTERVAL_SECONDS,
+    show_default=True,
+    help="Seconds between polls.",
+)
+@_connection_options
+@_handle_errors
+def workflow(
+    workflow_reference: str,
+    branch: str | None,
+    repo_option: github.Repo | None,
+    interval: int,
+    host: str | None,
+    token: str | None,
+    verbose: bool,
+) -> None:
+    """
+    Watch a GitHub Actions workflow on the bar until Ctrl+C.
+
+    WORKFLOW is a workflow id, filename, or display name.
+    """
+    _configure_logging(verbose=verbose)
+    config = load_config(host=host, token=token)
+    github_token = github.resolve_token()
+    if repo_option is not None:
+        repo = repo_option
+    else:
+        owner, name = git.origin_repo()
+        repo = github.Repo(owner=owner, name=name)
+    target = watch.Target(
+        repo=repo,
+        branch=branch or git.current_branch(),
+        workflow_id=github.resolve_workflow(github_token, repo, workflow_reference).id,
+    )
+    watch.watch(config, github_token, target, interval=interval)
