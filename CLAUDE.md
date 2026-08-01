@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-busyboy is a console application (CLI) that displays information on a BUSY Bar. It depends on `busylib`
-(`https://github.com/busy-app/busylib-py`), which wraps the bar's HTTP API.
+busyboy is a console application (CLI) that displays information on a BUSY Bar. It talks to the bar's HTTP
+API directly over `requests`, following the bar's own OpenAPI spec (vendored at
+`docs/superpowers/references/openapi.yaml`) for field names, patterns, and enums.
 
 Requires Python >=3.14. Dependency management, builds, and packaging all go through `uv`.
 
@@ -29,7 +30,7 @@ commands use `--frozen` and expect the lockfile to already match.
 
 ## Architecture
 
-Three modules with one job each. Keep the boundaries: `config.py` imports neither Click nor busylib, `bar.py`
+Four modules with one job each. Keep the boundaries: `config.py` imports neither Click nor `bar.py`, `bar.py`
 knows nothing about argv or the environment, and `cli.py` holds no BUSY Bar payload knowledge.
 
 - `src/busyboy/config.py` — `BusyboyConfig` (pydantic-settings, `env_prefix="BUSYBOY_"`, frozen), defaulting
@@ -37,8 +38,12 @@ knows nothing about argv or the environment, and `cli.py` holds no BUSY Bar payl
   arguments beat environment variables because pydantic-settings ranks init arguments above env sources.
   `BusyboyConfig.token_value` encapsulates unwrapping the `SecretStr` (or returning `None`) so callers never
   touch `get_secret_value()` directly.
-- `src/busyboy/bar.py` — `open_client`, `build_text_payload` (pure, no I/O), `draw_text`, `clear`, and the
-  payload constants. This is where BUSY Bar knowledge lives.
+- `src/busyboy/bar.py` — `build_text_payload` (pure, no I/O), `draw_text`, `clear`, the payload constants, and
+  the `requests`-based transport itself: a `requests.request(...)` call per delivery, retried up to
+  `MAX_RETRIES` times with backoff on transport-level failures, raising `busyboy.exceptions.BarAPIError` or
+  `BarRequestError` on failure. This is where BUSY Bar knowledge lives — payload shape and delivery both.
+- `src/busyboy/exceptions.py` — `BarError` (base), `BarAPIError`, `BarRequestError`, and
+  `format_delivery_error(error) -> str`, the one-line renderer `cli.py` prints to stderr.
 - `src/busyboy/cli.py` — the `main` Click group, the `text` and `clear` subcommands, and the
   error-to-exit-code mapping in `_handle_errors`.
 - `src/busyboy/__init__.py` — re-exports `main` so `[project.scripts] busyboy = "busyboy:main"` keeps working.
@@ -52,43 +57,27 @@ knows nothing about argv or the environment, and `cli.py` holds no BUSY Bar payl
 ### CLI contract
 
 Success is silent with exit 0. Expected failures print one line to stderr and exit 1; Click usage errors exit 2.
-`--verbose` enables busylib request logging and lets the original exception propagate for a traceback.
+`--verbose` sets the root logger to `DEBUG` (surfacing `urllib3`'s own per-connection request logging) and lets
+the original exception propagate for a traceback.
 
 Configuration is `BUSYBOY_HOST` and `BUSYBOY_TOKEN`, both optional and overridable per invocation with
-`--host` / `--token`. `host` defaults to `10.0.4.20`, busylib's own USB-subnet address, so a USB-connected bar
-needs no configuration at all. `token` defaults to unset. busyboy always passes `host` through to `open_client`,
-so busylib is always in "network" mode; a configured token is sent as `X-API-Token`, and an unset one is simply
-omitted from the request. Over WiFi (a non-default host) the token remains optional — supply one if the bar
-requires it.
+`--host` / `--token`. `host` defaults to `10.0.4.20`, the bar's own USB-subnet address, so a USB-connected bar
+needs no configuration at all. `token` defaults to unset. A configured token is always sent as `X-API-Token`;
+an unset one is simply omitted from the request — there is no separate client "mode" to be in. Over WiFi (a
+non-default host) the token remains optional — supply one if the bar requires it.
 
 ## Gotchas
 
 These cost real time to discover. Check here before re-deriving them.
-
-**busylib's context manager loses the subtype.** `SyncClientBase.__enter__` is annotated to return
-`SyncClientBase`, not `Self`, and `display_draw`/`display_clear` live on `BusyBar`. So
-`with open_client(...) as client:` types `client` as `SyncClientBase` and fails `ty check`. Bind first, then use
-the binding as the context manager:
-
-```python
-client = bar.open_client(config)
-with client:
-    bar.draw_text(client, payload)
-```
-
-Do not reach for `cast`, `Any`, or `# noqa` here — they only hide it.
 
 **Unpacking into `BaseSettings` needs `dict[str, Any]`.** `BaseSettings.__init__` also accepts private keyword
 arguments (`_case_sensitive`, `_env_prefix`, ...), so unpacking a `dict[str, str]` makes `ty` report
 `Expected 'bool | None', found 'str'`.
 
 **Ruff's `force-sort-within-sections` sorts `import x` and `from x import y` together** by module name. So
-`from busylib import ...` comes before `import click`, and `from collections.abc import Callable` before
-`import functools`. Write imports that way or `make format` will rewrite them.
-
-**busylib logs API failures itself**, at error level. With no logging configured those reach stderr through
-Python's last-resort handler and duplicate the CLI's own message. `cli.py` sets the `busylib` logger to
-`CRITICAL` unless `--verbose`.
+`from pydantic import ...` comes before `from pydantic_extra_types.color import Color`, which comes before
+`import requests`; and `from collections.abc import Callable` before `import functools`. Write imports that
+way or `make format` will rewrite them.
 
 **Never let pydantic's `ValidationError` into a traceback that a user sees.** Its `missing` errors carry the
 entire pre-coercion input dict as `input_value` — including the API token. `SecretStr` does not help, because
@@ -96,27 +85,31 @@ the leak is of the raw input rather than the coerced field. `load_config` raises
 specifically to break that chain; keep it that way even though `host` and `token` both have defaults now and no
 `missing` error can currently be produced — a future required field would reintroduce the same risk.
 
-**`click.Choice` returns `str`**, so passing it to a busylib `Literal` field needs a `cast`. That cast is
-legitimate — the parser has already restricted the value.
+**`click.Choice` returns `str`**, so passing it to `bar.DisplayFontName` (a `Literal`) needs a `cast`. That
+cast is legitimate — the parser has already restricted the value.
 
 ## Testing
 
-`busylib`'s client accepts `transport=`, so tests drive a real `BusyBar` against an `httpx.MockTransport` rather
-than mocking busylib internals. `bar.open_client` exposes that parameter for exactly this reason.
+Tests drive the real `bar.py` functions against `responses`-registered endpoints rather than mocking anything
+internal to `bar.py` or `requests` itself.
 
-- Mock responses must match the real shape: `SuccessResponse` requires a `result` field, so return
-  `{"result": "ok"}`, not `{"success": True}`.
-- Use **401** for failure-path tests, not 500. busylib retries `408, 429, 500, 502, 503, 504` up to
-  `max_retries=2` with a 0.25 s backoff, so a 500 just makes the test sleep.
-- `tests/test_cli.py` monkeypatches `cli.bar.open_client` to inject the mock transport and record requests.
+- Response bodies don't need to match any particular shape — busyboy only checks the HTTP status code, and
+  discards the response body entirely on success.
+- Use **401** for failure-path tests, not 500 or a registered connection error, unless the test specifically
+  targets retry behavior — `bar.py` retries transport-level failures (connection errors, timeouts) up to
+  `MAX_RETRIES` times with a `RETRY_BACKOFF_SECONDS * (attempt + 1)` sleep between attempts, so provoking that
+  path sleeps the test unless `time.sleep` is monkeypatched (see `test_a_connection_failure_retries_then_raises`
+  in `tests/test_bar.py`). HTTP error responses are never retried, regardless of status code.
+- `tests/test_cli.py` registers a `responses` callback matching any host (`re.compile(r"^http://[^/]+/api/display/draw")`)
+  so the `--host` override test doesn't need special-casing.
 - Click 8.2+ removed `CliRunner(mix_stderr=...)`. `result.output` is stdout only; `result.stderr` is separate.
 - Tests that touch config must clear `BUSYBOY_HOST` / `BUSYBOY_TOKEN` (there is an autouse fixture for this) or
   they will pick up a real environment.
 
 ## Hardware facts
 
-Measured against a real bar by capturing frames from `/api/screen` and analysing pixel shift. busylib's schema
-documents none of this.
+Measured against a real bar by capturing frames from `/api/screen` and analysing pixel shift. The OpenAPI spec
+(`docs/superpowers/references/openapi.yaml`) documents none of this.
 
 - The front display is **72x16** RGB; the back display is 160x80 monochrome. busyboy only uses the front.
 - **`scroll_rate` is pixels per minute** — px/sec is roughly `rate / 60`. Higher is faster; text scrolls
@@ -132,9 +125,16 @@ documents none of this.
 
 ### Testing against a real bar
 
-`source ~/.zshrc && busybarenv` exports `BUSYBOY_HOST` and `BUSYBOY_TOKEN` for a real device. Frames can be read
-back with `BusyBar.screen(0)`, which returns decoded RGB888 bytes — useful for asserting what actually rendered.
-Never print or commit the token value.
+`source ~/.zshrc && busybarenv` exports `BUSYBOY_HOST` and `BUSYBOY_TOKEN` for a real device. Never print or
+commit the token value.
+
+Frame capture for visual verification (`GET /api/screen`, base64-encoded RGB888/L4 framebuffer bytes) previously
+used busylib's `BusyBar.screen(0)` helper during hardware calibration. That helper is no longer available in
+this project's environment now that busylib isn't a dependency — busyboy's own CLI never called it, so it
+wasn't reimplemented. If frame capture is needed again, either `pip install busylib` in a scratch virtualenv
+outside this project's lockfile, or decode `/api/screen` directly: the response body's `Content-Type:
+image/bmp` header is misleading (there's no real BMP header), it's base64-encoded raw framebuffer bytes,
+RGB888 for the front display (`display=0`) and L4-packed (2 pixels/byte) for the back display (`display=1`).
 
 ## CI
 
