@@ -189,3 +189,84 @@ def test_an_unreachable_bar_keeps_the_previous_state(config, monkeypatch):
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
 
     assert watch.tick(config, TOKEN, TARGET, previous) == previous
+
+
+@responses.activate
+def test_the_loop_uploads_icons_then_polls_until_interrupted(config):
+    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
+    )
+    responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
+    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
+
+    slept: list[float] = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        if len(slept) == 2:
+            raise KeyboardInterrupt
+
+    watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
+
+    assert slept == [10, 10]
+    uploads = [call for call in responses.calls if "assets/upload" in (call.request.url or "")]
+    assert len(uploads) == len(bar.ICON_NAMES)
+    assert [call for call in responses.calls if call.request.method == "DELETE"]
+
+
+@responses.activate
+def test_an_interrupt_clears_the_display(config):
+    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    responses.add(responses.GET, RUNS_URL, json={"workflow_runs": []})
+    responses.add(responses.GET, PULLS_URL, json=[])
+    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
+
+    def sleep(seconds):
+        raise KeyboardInterrupt
+
+    watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
+
+    deletes = [call for call in responses.calls if call.request.method == "DELETE"]
+    assert len(deletes) == 1
+
+
+@responses.activate
+def test_a_fatal_error_still_clears_the_display(config):
+    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    responses.add(responses.GET, RUNS_URL, json={"message": "Bad credentials"}, status=401)
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
+
+    with pytest.raises(exceptions.GitHubAuthError):
+        watch.watch(config, TOKEN, TARGET, interval=10, sleep=lambda seconds: None)
+
+    assert [call for call in responses.calls if call.request.method == "DELETE"]
+
+
+@responses.activate
+def test_a_bar_that_dies_during_cleanup_does_not_mask_the_interrupt(config, monkeypatch):
+    monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
+    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    responses.add(responses.GET, RUNS_URL, json={"workflow_runs": []})
+    responses.add(responses.GET, PULLS_URL, json=[])
+    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    responses.add(responses.DELETE, DRAW_URL, body=requests.exceptions.ConnectionError("boom"))
+
+    def sleep(seconds):
+        raise KeyboardInterrupt
+
+    watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
+
+
+@responses.activate
+def test_a_failed_icon_upload_stops_before_the_loop(config):
+    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"error": "no"}, status=401)
+
+    with pytest.raises(exceptions.BarError):
+        watch.watch(config, TOKEN, TARGET, interval=10, sleep=lambda seconds: None)
+
+    assert not [call for call in responses.calls if "actions/workflows" in (call.request.url or "")]

@@ -1,7 +1,9 @@
 """The workflow poll loop: fetch, translate to a display state, draw when it changes."""
 
+from collections.abc import Callable
 import dataclasses
 import logging
+import time
 
 from busyboy import bar, exceptions, github
 from busyboy.config import BusyboyConfig
@@ -113,3 +115,40 @@ def tick(
         LOGGER.debug("Draw failed, keeping the display as it is: %s", error)
         return previous
     return screen
+
+
+def watch(
+    config: BusyboyConfig,
+    token: str,
+    target: Target,
+    *,
+    interval: int = DEFAULT_INTERVAL_SECONDS,
+    sleep: Callable[[float], None] | None = None,
+) -> None:
+    """
+    Poll until interrupted, then clear the display.
+
+    `sleep` is injected so tests can drive the loop without waiting, and can
+    end it by raising KeyboardInterrupt the way Ctrl+C does. It defaults to
+    None rather than to time.sleep directly: a default bound at definition
+    time cannot be monkeypatched, and the CLI tests patch time.sleep.
+
+    The display is cleared on the way out however the loop ends, including on a
+    fatal error: leaving a stale workflow status on the bar after the process
+    is gone would be worse than showing nothing.
+    """
+    pause = sleep if sleep is not None else time.sleep
+    bar.upload_icons(config)
+    screen: Screen | None = None
+    try:
+        while True:
+            screen = tick(config, token, target, screen)
+            pause(interval)
+    except KeyboardInterrupt:
+        LOGGER.debug("Interrupted, clearing the display")
+    finally:
+        try:
+            bar.clear(config)
+        except exceptions.BarError as error:
+            # Never let cleanup mask why the loop actually ended.
+            LOGGER.debug("Could not clear the display on exit: %s", error)
