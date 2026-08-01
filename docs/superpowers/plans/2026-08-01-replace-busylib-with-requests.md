@@ -370,6 +370,8 @@ def test_a_rejected_request_raises(config):
     with pytest.raises(exceptions.BarError):
         bar.clear(config)
 
+    assert len(responses.calls) == 1
+
 
 @responses.activate
 def test_a_connection_failure_retries_then_raises(config, monkeypatch):
@@ -449,14 +451,10 @@ def _normalize_color(value: str | None) -> str | None:
     """Normalize a CSS name, hex, or rgb() string to #RRGGBBAA."""
     if value is None:
         return None
-    color = Color(value)
-    hex_value = color.as_hex().upper()
-    if len(hex_value) == 9:
-        return hex_value
+    hex_value = Color(value).as_hex("long").upper()
     if len(hex_value) == 7:
         return f"{hex_value}FF"
-    r, g, b = color.as_rgb_tuple()[:3]
-    return f"#{r:02X}{g:02X}{b:02X}FF"
+    return hex_value
 
 
 class TextElement(BaseModel):
@@ -580,12 +578,6 @@ def _request(
         if response.status_code >= 400:
             _raise_for_error_response(response, method=method)
         return
-    raise exceptions.BarRequestError(
-        "Unknown request error",
-        method=method,
-        path=DISPLAY_DRAW_PATH,
-        attempts=MAX_RETRIES + 1,
-    )
 
 
 def draw_text(config: BusyboyConfig, payload: DisplayElements) -> None:
