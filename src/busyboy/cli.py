@@ -5,11 +5,10 @@ import functools
 import logging
 from typing import Any, cast
 
-from busylib import exceptions, types
 import click
 from pydantic import ValidationError
 
-from busyboy import bar
+from busyboy import bar, exceptions
 from busyboy.config import ConfigError, load_config
 
 
@@ -17,14 +16,13 @@ def _configure_logging(*, verbose: bool) -> None:
     """
     Set up logging for one invocation.
 
-    busylib logs API failures at error level. Without a level override those
-    reach stderr through Python's last-resort handler and duplicate the message
-    we print ourselves.
+    --verbose raises the level to DEBUG, which is what turns on urllib3's own
+    per-connection request logging (the standard way to see requests traffic).
+    Non-verbose runs need no configuration: requests/urllib3 doesn't log HTTP
+    error responses at error level, so there's no duplicate message to silence.
     """
     if verbose:
-        logging.basicConfig(level=logging.INFO)
-    else:
-        logging.getLogger("busylib").setLevel(logging.CRITICAL)
+        logging.basicConfig(level=logging.DEBUG)
 
 
 def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -52,7 +50,7 @@ def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
                 f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}" for detail in error.errors()
             )
             raise click.ClickException(f"Invalid value: {details}") from error
-        except exceptions.BusyBarError as error:
+        except exceptions.BarError as error:
             if verbose:
                 raise
             message = exceptions.format_delivery_error(error)
@@ -131,14 +129,12 @@ def text(
     config = load_config(host=host, token=token)
     payload = bar.build_text_payload(
         text,
-        font=cast(types.DisplayFontName, font),
+        font=cast(bar.DisplayFontName, font),
         color=color,
         timeout=timeout,
         scroll_rate=scroll_rate,
     )
-    client = bar.open_client(config)
-    with client:
-        bar.draw_text(client, payload)
+    bar.draw_text(config, payload)
 
 
 @main.command()
@@ -152,6 +148,4 @@ def clear(
     """Remove what busyboy drew from the display."""
     _configure_logging(verbose=verbose)
     config = load_config(host=host, token=token)
-    client = bar.open_client(config)
-    with client:
-        bar.clear(client)
+    bar.clear(config)

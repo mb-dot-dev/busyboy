@@ -8,10 +8,11 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "busylib @ git+https://github.com/busy-app/busylib-py",
     "click>=8.4.2",
     "pydantic>=2.13.4",
+    "pydantic-extra-types>=2.11.1",
     "pydantic-settings>=2.14.2",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]
@@ -25,8 +26,10 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "responses>=0.26.2",
     "ruff>=0.16.1",
     "ty>=0.0.65",
+    "types-requests>=2.33.0.20260712",
 ]
 
 ##### TESTING #####

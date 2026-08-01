@@ -11,3 +11,6 @@ wheels/
 
 # Coverage
 .coverage
+
+# Subagent-driven-development scratch workspace
+.superpowers/
