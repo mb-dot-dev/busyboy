@@ -210,3 +210,54 @@ def test_a_missing_repository_is_fatal_but_not_transient():
         github.resolve_workflow(TOKEN, REPO, "CI")
 
     assert not isinstance(caught.value, exceptions.GitHubTransientError)
+
+
+@responses.activate
+def test_a_403_with_an_exhausted_rate_limit_header_is_transient():
+    responses.add(
+        responses.GET,
+        WORKFLOWS_URL,
+        json={"message": "rate limited"},
+        status=403,
+        headers={"x-ratelimit-remaining": "0"},
+    )
+
+    with pytest.raises(exceptions.GitHubTransientError):
+        github.resolve_workflow(TOKEN, REPO, "CI")
+
+
+@responses.activate
+def test_a_403_without_rate_limit_evidence_is_still_a_fatal_auth_error():
+    responses.add(responses.GET, WORKFLOWS_URL, json={"message": "Bad credentials"}, status=403)
+
+    with pytest.raises(exceptions.GitHubAuthError):
+        github.resolve_workflow(TOKEN, REPO, "CI")
+
+
+@responses.activate
+def test_a_429_is_transient_even_without_rate_limit_headers():
+    responses.add(responses.GET, WORKFLOWS_URL, json={"message": "rate limited"}, status=429)
+
+    with pytest.raises(exceptions.GitHubTransientError):
+        github.resolve_workflow(TOKEN, REPO, "CI")
+
+
+@responses.activate
+def test_a_non_list_pulls_payload_is_transient_not_a_keyerror():
+    responses.add(responses.GET, PULLS_URL, json={"message": "unexpected shape"}, status=200)
+
+    with pytest.raises(exceptions.GitHubTransientError):
+        github.pull_request_number(TOKEN, REPO, "feature/x")
+
+
+@responses.activate
+def test_a_run_with_a_non_numeric_id_is_transient_not_a_validation_error():
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"workflow_runs": [{"id": "not-an-int", "status": "completed", "conclusion": "success"}]},
+        status=200,
+    )
+
+    with pytest.raises(exceptions.GitHubTransientError):
+        github.latest_run(TOKEN, REPO, 42, "main")

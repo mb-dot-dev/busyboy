@@ -5,7 +5,7 @@ from pathlib import PurePosixPath
 import subprocess
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import requests
 
 from busyboy import exceptions
@@ -81,13 +81,34 @@ class Run(BaseModel):
     conclusion: str | None = None
 
 
+def _is_rate_limited(response: requests.Response) -> bool:
+    """
+    True when response headers show GitHub rate-limited the request, not merely rejected it.
+
+    A Retry-After header, or an x-ratelimit-remaining of exactly "0", is GitHub's own
+    signal that the client should back off and retry rather than treat this as fatal.
+    Header lookup is case-insensitive because `requests.Response.headers` already is.
+    """
+    if "Retry-After" in response.headers:
+        return True
+    return response.headers.get("x-ratelimit-remaining") == "0"
+
+
 def _get(token: str, path: str, params: dict[str, str] | None = None) -> Any:
     """
     GET one GitHub API path, classifying failures by whether retrying could help.
 
     A rejected token and a missing repository will never fix themselves, so
-    they raise GitHubError (fatal). Server errors and transport failures raise
-    GitHubTransientError, which the watch loop swallows and retries.
+    they raise GitHubError (fatal). Server errors, transport failures, rate
+    limiting, and malformed response bodies raise GitHubTransientError, which
+    the watch loop swallows and retries.
+
+    403 is ambiguous on GitHub: it means both a rejected token and primary or
+    secondary rate limiting. 429 always means rate limiting. Both are treated
+    as transient when they carry rate-limit evidence (see `_is_rate_limited`);
+    a 429 with no such evidence is still transient, since 429 means rate
+    limited by definition, while a 403 with no such evidence is a fatal auth
+    failure.
     """
     headers = {
         "Authorization": f"Bearer {token}",
@@ -99,6 +120,8 @@ def _get(token: str, path: str, params: dict[str, str] | None = None) -> Any:
     except requests.exceptions.RequestException as error:
         raise exceptions.GitHubTransientError(f"GET {path} failed: {error}") from error
     with response:
+        if response.status_code == 429 or (response.status_code == 403 and _is_rate_limited(response)):
+            raise exceptions.GitHubTransientError(f"GitHub rate-limited GET {path} (HTTP {response.status_code})")
         if response.status_code in AUTH_STATUS_CODES:
             raise exceptions.GitHubAuthError(f"GitHub rejected the token (HTTP {response.status_code}) on GET {path}")
         if response.status_code >= 500:
@@ -119,7 +142,12 @@ def resolve_workflow(token: str, repo: Repo, reference: str) -> Workflow:
     forms are resolved here against the full workflow list.
     """
     payload = _get(token, f"/repos/{repo.slug}/actions/workflows", {"per_page": "100"})
-    workflows = [Workflow.model_validate(item) for item in payload.get("workflows", [])]
+    try:
+        workflows = [Workflow.model_validate(item) for item in payload.get("workflows", [])]
+    except (AttributeError, TypeError, ValidationError) as error:
+        raise exceptions.GitHubTransientError(
+            f"GitHub returned a workflows payload that did not match the expected shape for {repo.slug}"
+        ) from error
     for workflow in workflows:
         if reference == str(workflow.id) or reference == PurePosixPath(workflow.path).name:
             return workflow
@@ -137,8 +165,13 @@ def latest_run(token: str, repo: Repo, workflow_id: int, branch: str) -> Run | N
         f"/repos/{repo.slug}/actions/workflows/{workflow_id}/runs",
         {"branch": branch, "per_page": "1"},
     )
-    runs = payload.get("workflow_runs", [])
-    return Run.model_validate(runs[0]) if runs else None
+    try:
+        runs = payload.get("workflow_runs", [])
+        return Run.model_validate(runs[0]) if runs else None
+    except (AttributeError, TypeError, ValidationError) as error:
+        raise exceptions.GitHubTransientError(
+            f"GitHub returned a run payload that did not match the expected shape for {repo.slug}"
+        ) from error
 
 
 def pull_request_number(token: str, repo: Repo, branch: str) -> int | None:
@@ -154,4 +187,9 @@ def pull_request_number(token: str, repo: Repo, branch: str) -> int | None:
         f"/repos/{repo.slug}/pulls",
         {"head": f"{repo.owner}:{branch}", "state": "open", "per_page": "1"},
     )
-    return int(payload[0]["number"]) if payload else None
+    try:
+        return int(payload[0]["number"]) if payload else None
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise exceptions.GitHubTransientError(
+            f"GitHub returned a pulls payload that did not match the expected shape for {repo.slug}"
+        ) from error
