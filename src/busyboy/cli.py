@@ -151,8 +151,26 @@ def clear(
     bar.clear(config)
 
 
-def _parse_repo(value: str) -> github.Repo:
-    """Split an explicit --repo into owner and name."""
+def _parse_repo(
+    context: click.Context,
+    parameter: click.Parameter,
+    value: str | None,
+) -> github.Repo | None:
+    """
+    Split an explicit --repo into owner and name, or pass None through.
+
+    `context` and `parameter` go unused; Click passes all three to every
+    parameter callback.
+
+    This is a Click parameter callback rather than a plain helper so it runs
+    while Click parses the command line, before the body resolves a GitHub
+    token. A malformed option is a usage error whatever the environment; if it
+    were validated in the body instead, a developer with no gh login would get
+    exit 1 about a missing token rather than exit 2 about the option they
+    actually got wrong.
+    """
+    if value is None:
+        return None
     owner, separator, name = value.partition("/")
     if not (owner and separator and name) or "/" in name:
         raise click.BadParameter("expected owner/name", param_hint="--repo")
@@ -175,6 +193,7 @@ def gh() -> None:
     "--repo",
     "repo_option",
     default=None,
+    callback=_parse_repo,
     help="Repository as owner/name. Defaults to origin's.",
 )
 @click.option(
@@ -189,7 +208,7 @@ def gh() -> None:
 def workflow(
     workflow_reference: str,
     branch: str | None,
-    repo_option: str | None,
+    repo_option: github.Repo | None,
     interval: int,
     host: str | None,
     token: str | None,
@@ -203,8 +222,8 @@ def workflow(
     _configure_logging(verbose=verbose)
     config = load_config(host=host, token=token)
     github_token = github.resolve_token()
-    if repo_option:
-        repo = _parse_repo(repo_option)
+    if repo_option is not None:
+        repo = repo_option
     else:
         owner, name = git.origin_repo()
         repo = github.Repo(owner=owner, name=name)

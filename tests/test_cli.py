@@ -16,9 +16,16 @@ DRAW_URL_PATTERN = re.compile(r"^http://[^/]+/api/display/draw")
 
 @pytest.fixture(autouse=True)
 def _clean_environment(monkeypatch):
-    """Keep the developer's own BUSYBOY_* variables out of these tests."""
+    """
+    Keep the developer's own environment out of these tests.
+
+    GITHUB_TOKEN matters as much as the BUSYBOY_* pair: with it set, a test
+    that reaches the real `github.resolve_token` passes on a developer's
+    machine and fails on a CI runner that has neither it nor a gh login.
+    """
     monkeypatch.delenv("BUSYBOY_HOST", raising=False)
     monkeypatch.delenv("BUSYBOY_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
 
 class Recorder:
@@ -224,7 +231,31 @@ def test_an_explicit_repo_and_branch_override_detection(github_bar, monkeypatch)
     assert result.exit_code == 0
 
 
-def test_a_malformed_repo_is_a_usage_error():
+def test_a_malformed_repo_is_a_usage_error(monkeypatch):
+    monkeypatch.setattr(cli.github, "resolve_token", lambda: "gho_test")
+
+    result = CliRunner().invoke(cli.main, ["gh", "workflow", "CI", "--repo", "busyboy"], env=ENV)
+
+    assert result.exit_code == 2
+    assert "owner/name" in result.stderr
+
+
+def test_a_malformed_repo_is_a_usage_error_even_without_a_github_token(monkeypatch):
+    """
+    A bad option is a usage error regardless of the environment.
+
+    --repo is validated while Click parses parameters, before the command body
+    resolves a token, so a developer with no gh login still gets exit 2 and a
+    message about the option they got wrong -- not exit 1 about a missing
+    token. Without that ordering this test fails in CI and passes locally,
+    purely on whether `gh auth token` happens to work.
+    """
+
+    def no_token():
+        raise exceptions.GitHubError(github.NO_TOKEN_MESSAGE)
+
+    monkeypatch.setattr(cli.github, "resolve_token", no_token)
+
     result = CliRunner().invoke(cli.main, ["gh", "workflow", "CI", "--repo", "busyboy"], env=ENV)
 
     assert result.exit_code == 2

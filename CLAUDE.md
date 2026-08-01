@@ -179,6 +179,13 @@ display legible.
 Tests drive the real `bar.py` functions against `responses`-registered endpoints rather than mocking anything
 internal to `bar.py` or `requests` itself.
 
+**No test may depend on ambient GitHub auth.** A test that reaches the real `github.resolve_token` shells out to
+`gh auth token`, so it passes on a logged-in developer's machine and fails on a CI runner that has neither a gh
+login nor `GITHUB_TOKEN`. Any test invoking a `gh workflow` command must monkeypatch `cli.github.resolve_token`,
+and `tests/test_cli.py`'s autouse fixture clears `GITHUB_TOKEN` alongside the `BUSYBOY_*` pair. To check a
+change against the CI environment rather than yours, put a `gh` that exits non-zero first on `PATH`:
+`env -u GITHUB_TOKEN PATH=/dir/with/failing/gh:$PATH uv run --frozen pytest`.
+
 - Response bodies don't need to match any particular shape — busyboy only checks the HTTP status code, and
   discards the response body entirely on success.
 - Use **401** for failure-path tests, not 500 or a registered connection error, unless the test specifically
