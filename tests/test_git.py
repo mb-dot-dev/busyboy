@@ -47,6 +47,15 @@ def test_an_unparseable_remote_url_is_rejected():
         git.parse_remote_url("not-a-remote")
 
 
+def test_a_credentialed_unparseable_url_does_not_leak_the_credential():
+    secret = "s3cr3t-token"
+
+    with pytest.raises(exceptions.GitError) as exc_info:
+        git.parse_remote_url(f"https://user:{secret}@host")
+
+    assert secret not in str(exc_info.value)
+
+
 def test_the_current_branch_comes_from_rev_parse(fake_git):
     calls, result = fake_git
     result.stdout = "feature/gh-workflow-watch\n"

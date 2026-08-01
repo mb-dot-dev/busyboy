@@ -9,7 +9,18 @@ from busyboy import exceptions
 # git@host:owner/name.git, https://host/owner/name, ssh://git@host/owner/name.git
 REMOTE_PATTERN = re.compile(r"[:/](?P<owner>[^/:]+)/(?P<name>[^/:]+?)(?:\.git)?/?$")
 
+# Matches the userinfo component of a URL: everything between `//` and `@`, e.g. the
+# `user:token` in `https://user:token@host/...`. Used only to redact before logging/raising.
+USERINFO_PATTERN = re.compile(r"//[^/@]*@")
+
+REDACTED_USERINFO = "//<redacted>@"
+
 SUBPROCESS_TIMEOUT_SECONDS = 10
+
+
+def _redact_userinfo(url: str) -> str:
+    """Replace any credentials embedded between `//` and `@` with a fixed placeholder."""
+    return USERINFO_PATTERN.sub(REDACTED_USERINFO, url)
 
 
 def _run(*args: str) -> str:
@@ -35,7 +46,7 @@ def parse_remote_url(url: str) -> tuple[str, str]:
     """Pull the owner and repository name out of any git remote URL form."""
     match = REMOTE_PATTERN.search(url)
     if match is None:
-        raise exceptions.GitError(f"Cannot read an owner/name out of the remote URL: {url}")
+        raise exceptions.GitError(f"Cannot read an owner/name out of the remote URL: {_redact_userinfo(url)}")
     return match["owner"], match["name"]
 
 
