@@ -199,8 +199,11 @@ them.
 | Not a git repository, or no `origin` remote | exit 1 |
 | `--repo` not in `owner/name` form | exit 2 (Click usage error) |
 | Workflow argument matches no workflow | exit 1, listing the available workflow names |
-| GitHub 401 or 403 | exit 1 — an auth failure never self-heals |
+| GitHub 401 | exit 1 — an auth failure never self-heals |
+| GitHub 403 or 429 carrying rate-limit evidence | log at DEBUG, leave the bar untouched, retry next tick |
+| GitHub 403 without rate-limit evidence | exit 1 — a genuine credential or scope failure |
 | GitHub 5xx, timeout, connection drop | log at DEBUG, leave the bar untouched, retry next tick |
+| Malformed response body (not JSON, wrong shape, schema drift) | treated as transient — retry next tick |
 | Bar unreachable mid-watch | same — `bar.py`'s existing retry-then-raise is caught by the tick |
 | Asset upload fails at startup | exit 1 — the display would be missing its icon |
 | Ctrl+C | clear the display, exit 0 |
@@ -209,6 +212,14 @@ This keeps the existing CLI contract for everything that happens before the loop
 to stderr, exit 1; Click usage errors exit 2), and deliberately departs from it inside the loop. A
 watch process is expected to outlive a laptop sleeping or a wifi hiccup; a two-second blip should
 not end it.
+
+**Revised during implementation.** This table originally read "GitHub 401 or 403 → exit 1". Review
+found that GitHub returns 403 for rate limiting as well as for bad credentials, so a rate-limited
+watch would have died rather than waited — and 429 was not covered at all. Rate-limit evidence is
+now what decides: a `Retry-After` header, or `x-ratelimit-remaining: 0`. Without it, a 403 is still
+fatal. Malformed response bodies were likewise uncovered and crashed with a bare `KeyError` or
+`pydantic.ValidationError` instead of a `BusyboyError`; they are now transient, on the grounds that
+a body that fails to parse is more often a proxy or outage artifact than a permanent condition.
 
 Under `--verbose` the root logger goes to DEBUG and startup errors propagate as tracebacks, as they
 already do. Swallowed in-loop errors are logged at DEBUG regardless, so `--verbose` is how you see
