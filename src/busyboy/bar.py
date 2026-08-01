@@ -154,7 +154,7 @@ def _row(element_id: str, text: str, y: int) -> TextElement:
     """Build one row of the workflow layout, scrolling when it overflows the column."""
     return TextElement(
         id=element_id,
-        text=text,
+        text=_to_displayable_ascii(text),
         font=ROW_FONT,
         display="front",
         x=TEXT_X,
@@ -164,12 +164,31 @@ def _row(element_id: str, text: str, y: int) -> TextElement:
     )
 
 
+def _to_displayable_ascii(text: str) -> str:
+    """
+    Replace every character outside printable ASCII (\\x20-\\x7E) with '?'.
+
+    The front display's fonts are bitmap ASCII, so the device itself cannot
+    render anything else — a repo or branch name containing unicode (both are
+    permitted by GitHub) would otherwise fail `TextElement.text`'s pattern and
+    raise a `pydantic.ValidationError` out of payload construction. Characters
+    are replaced one-for-one rather than dropped, so a non-empty input always
+    produces a non-empty, valid result (`TextElement.text` requires
+    `min_length=1`) — even when every character is non-ASCII. An empty input
+    returns "?" for the same reason.
+    """
+    if not text:
+        return "?"
+    return "".join(character if "\x20" <= character <= "\x7e" else "?" for character in text)
+
+
 def build_workflow_payload(*, repo_label: str, ref_label: str, icon: IconName) -> DisplayElements:
     """
     Build the two-row workflow layout: repository, pull request or branch, and a status icon.
 
     Element ids are stable, so redrawing replaces the previous elements rather
-    than stacking new ones on top of them.
+    than stacking new ones on top of them. Labels are sanitized to printable
+    ASCII before reaching `TextElement`; see `_to_displayable_ascii`.
     """
     return DisplayElements(
         application_name=APPLICATION_NAME,

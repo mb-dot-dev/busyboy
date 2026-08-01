@@ -158,6 +158,24 @@ def test_a_rejected_github_token_is_not_swallowed(config):
 
 
 @responses.activate
+def test_a_non_ascii_branch_name_completes_and_draws_instead_of_raising(config):
+    unicode_target = watch.Target(repo=REPO, branch="feature/café", workflow_id=42)
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
+    )
+    responses.add(responses.GET, PULLS_URL, json=[])
+    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+
+    screen = watch.tick(config, TOKEN, unicode_target, None)
+
+    assert screen is not None
+    assert screen.icon == "success"
+    assert [call for call in responses.calls if call.request.method == "POST"]
+
+
+@responses.activate
 def test_an_unreachable_bar_keeps_the_previous_state(config, monkeypatch):
     monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
     responses.add(

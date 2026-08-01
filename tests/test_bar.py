@@ -265,9 +265,37 @@ def test_workflow_element_ids_are_stable_so_a_redraw_replaces():
     assert set(first) == set(second)
 
 
-def test_non_ascii_row_text_is_rejected():
-    with pytest.raises(ValidationError):
+def test_a_non_ascii_repo_label_is_sanitized_rather_than_rejected():
+    elements = elements_by_id(
         bar.build_workflow_payload(repo_label="mb-dot-dev/büsyboy", ref_label="#12", icon="success")
+    )
+
+    assert elements["repo"]["text"] == "mb-dot-dev/b?syboy"
+
+
+def test_a_non_ascii_ref_label_is_sanitized_rather_than_rejected():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/busyboy", ref_label="feature/café", icon="success")
+    )
+
+    assert elements["ref"]["text"] == "feature/caf?"
+
+
+def test_a_label_that_is_entirely_non_ascii_is_still_a_valid_non_empty_payload():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/busyboy", ref_label="日本語", icon="success")
+    )
+
+    assert elements["ref"]["text"] == "???"
+
+
+def test_a_pure_ascii_label_passes_through_unchanged():
+    elements = elements_by_id(
+        bar.build_workflow_payload(repo_label="mb-dot-dev/busyboy", ref_label="feature/x", icon="success")
+    )
+
+    assert elements["repo"]["text"] == "mb-dot-dev/busyboy"
+    assert elements["ref"]["text"] == "feature/x"
 
 
 @responses.activate
