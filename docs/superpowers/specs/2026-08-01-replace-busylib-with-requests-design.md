@@ -162,12 +162,56 @@ functions against fake HTTP responses, not mocked internals.
 
 ## Documentation
 
-- **`CLAUDE.md`**: drop the busylib dependency line from the Project section; update Architecture to
-  describe `bar.py`'s expanded responsibility (payload + transport) and the new `exceptions.py`; remove the
-  context-manager-subtype gotcha; correct the retry-behavior gotcha as described above; record any new
-  gotchas found during implementation (e.g. `requests` timeout-tuple semantics, `responses` registration
-  quirks), following the same "Post-implementation corrections" pattern used in the text-subcommand design
-  doc.
+`CLAUDE.md` describes busylib in six places. Each needs an explicit change, not a blanket "update as needed"
+— the implementation plan should treat this as its own checklist:
+
+- **Project** (the opening paragraph): drop "It depends on `busylib` ..., which wraps the bar's HTTP API,"
+  replace with a line naming the direct `requests` integration and the OpenAPI spec as its reference.
+- **Architecture**: the intro sentence ("`config.py` imports neither Click nor busylib...") loses the
+  busylib clause; the `bar.py` bullet drops `open_client` and gains a mention of the `requests.Session`
+  transport and retry logic it now owns directly; a new bullet is added for `src/busyboy/exceptions.py`.
+- **CLI contract**: "`--verbose` enables busylib request logging" needs a real replacement — the
+  implementation plan must pick a concrete mechanism (e.g. `http.client.HTTPConnection.debuglevel = 1`, or
+  `logging.getLogger("urllib3")` at `DEBUG`) and document whichever one is actually wired up, rather than
+  leaving a vague claim. The paragraph describing busyboy always putting busylib in "network mode" is
+  rewritten without that vocabulary: busyboy always builds the URL from `host` and sends `X-API-Token` only
+  when a token is configured — no client "mode" concept exists anymore.
+- **Gotchas**:
+  - Delete "busylib's context manager loses the subtype" outright — the situation it describes no longer
+    exists once `open_client` is gone.
+  - Delete or rewrite "busylib logs API failures itself, at error level" — `requests`/`urllib3` does not
+    log HTTP error responses at error level the way busylib did, so the CRITICAL-level silencing this
+    gotcha describes has no direct equivalent. Confirm this during implementation (don't just assume) and
+    either remove the gotcha or replace it with whatever's actually needed once real request logging is
+    observed under `--verbose`.
+  - Update "Ruff's `force-sort-within-sections` sorts `import x` and `from x import y` together" — its
+    example (`from busylib import ...` before `import click`) references a module that no longer exists;
+    replace with a real import ordering example from the new code (e.g. `busyboy.exceptions` /
+    `requests`).
+  - Update "`click.Choice` returns `str`, so passing it to a busylib `Literal` field needs a `cast`" — the
+    `Literal` is now busyboy's own `DisplayFontName`, not busylib's; drop "busylib" from the wording.
+  - Unaffected, keep as-is: "Unpacking into `BaseSettings` needs `dict[str, Any]`" and "Never let pydantic's
+    `ValidationError` into a traceback a user sees" — both are about `config.py`, which never imported
+    busylib.
+- **Testing**: rewrite the opening paragraph for `responses` instead of `httpx.MockTransport`, drop the
+  "`bar.open_client` exposes `transport=` for exactly this reason" sentence (that parameter is gone), and
+  drop the "mock responses must match `SuccessResponse`'s shape" bullet — since busyboy no longer models or
+  validates the response body at all (see Scope), mock responses only need a 2xx/4xx status, not a
+  particular JSON shape. The retry-behavior correction is covered above. The
+  `tests/test_cli.py` bullet about monkeypatching `cli.bar.open_client` is rewritten to describe the
+  `responses`-registry-based fixture instead.
+- **Hardware facts**: the measured facts themselves (display dimensions, `scroll_rate`/`timeout` units,
+  the `align` and `application_name` gotchas) are unaffected — they're properties of the bar's firmware, not
+  of busylib. Only the framing sentence "busylib's schema documents none of this" is reworded to reference
+  the OpenAPI spec directly.
+- **Testing against a real bar**: this section currently points at `BusyBar.screen(0)` for reading back
+  frames during hardware calibration — a busylib method. Once busylib is removed from `pyproject.toml`, that
+  method is no longer available in the project's own environment. busyboy's CLI never called `screen()`
+  itself (it's a manual verification technique, not shipped code), so reimplementing `/api/screen` reading is
+  out of scope for this change. The section is updated to say so plainly: future frame-capture verification
+  needs either a scratch `pip install busylib` outside the project's lockfile, or a small standalone script
+  reimplementing the base64/RGB888 decode against `/api/screen` directly. This is a real (if narrow) loss of
+  a previously available dev convenience, called out here so it isn't discovered by surprise later.
 - **`README.md`**: no change expected — the CLI's user-facing behavior is identical.
 - **`docs/superpowers/references/openapi.yaml`**: vendored copy of the fetched spec (already saved as part
   of this design session), so the schema that justified field names, patterns, and enums survives if the
