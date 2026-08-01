@@ -131,6 +131,13 @@ rate limiting, and raises `GitHubAuthError` — fatal, per the hierarchy above.
 
 These cost real time to discover. Check here before re-deriving them.
 
+**`except OSError, subprocess.TimeoutExpired:` is correct, not a Python 2 relic.** PEP 758, accepted for
+Python 3.14, allows `except` to list multiple exception types without parentheses, and this project requires
+`>=3.14`. More to the point, `ruff format` actively *rewrites* the parenthesized form into this one, so
+"fixing" it back to `except (OSError, ...)` makes `ruff format --check` fail and breaks the build. It reads
+like a syntax error to anyone carrying Python 2 habits — it has been flagged three separate times — but it
+parses, imports, and passes CI on 3.14. Leave it.
+
 **Unpacking into `BaseSettings` needs `dict[str, Any]`.** `BaseSettings.__init__` also accepts private keyword
 arguments (`_case_sensitive`, `_env_prefix`, ...), so unpacking a `dict[str, str]` makes `ty` report
 `Expected 'bool | None', found 'str'`.
