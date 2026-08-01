@@ -1,13 +1,14 @@
 """Tests for BUSY Bar payload construction and delivery."""
 
 import json
+from urllib.parse import urlparse
 
-from busylib import exceptions
-import httpx
 from pydantic import ValidationError
 import pytest
+import requests
+import responses
 
-from busyboy import bar
+from busyboy import bar, exceptions
 from busyboy.config import load_config
 
 
@@ -84,63 +85,65 @@ def test_an_unrecognised_colour_is_rejected():
         bar.build_text_payload("hi", color="definitely-not-a-colour")
 
 
+@responses.activate
 def test_draw_text_posts_the_payload(config):
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, json={"result": "ok"})
+    responses.add(responses.POST, "http://10.0.4.20/api/display/draw", json={"result": "ok"}, status=200)
 
     payload = bar.build_text_payload("BUILD OK")
-    client = bar.open_client(config, transport=httpx.MockTransport(handler))
-    with client:
-        bar.draw_text(client, payload)
+    bar.draw_text(config, payload)
 
-    assert len(requests) == 1
-    assert requests[0].method == "POST"
-    assert requests[0].url.path == "/api/display/draw"
-    assert requests[0].headers["X-API-Token"] == "testtoken"
-    body = json.loads(requests[0].content)
+    assert len(responses.calls) == 1
+    request = responses.calls[0].request
+    assert request.method == "POST"
+    assert urlparse(request.url).path == "/api/display/draw"
+    assert request.headers["X-API-Token"] == "testtoken"
+    assert request.body is not None
+    body = json.loads(request.body)
     assert body["elements"][0]["text"] == "BUILD OK"
 
 
+@responses.activate
 def test_clear_deletes_the_drawing(config):
-    requests: list[httpx.Request] = []
+    responses.add(responses.DELETE, "http://10.0.4.20/api/display/draw", json={"result": "ok"}, status=200)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, json={"result": "ok"})
+    bar.clear(config)
 
-    client = bar.open_client(config, transport=httpx.MockTransport(handler))
-    with client:
-        bar.clear(client)
-
-    assert len(requests) == 1
-    assert requests[0].method == "DELETE"
-    assert requests[0].url.path == "/api/display/draw"
-    assert requests[0].url.params["application_name"] == bar.APPLICATION_NAME
+    assert len(responses.calls) == 1
+    request = responses.calls[0].request
+    assert request.method == "DELETE"
+    assert urlparse(request.url).query == "application_name=busyboy"
 
 
+@responses.activate
 def test_draw_text_omits_the_token_header_when_none_is_configured():
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, json={"result": "ok"})
+    responses.add(responses.POST, "http://10.0.4.20/api/display/draw", json={"result": "ok"}, status=200)
 
     config = load_config(host="10.0.4.20")
     payload = bar.build_text_payload("BUILD OK")
-    client = bar.open_client(config, transport=httpx.MockTransport(handler))
-    with client:
-        bar.draw_text(client, payload)
+    bar.draw_text(config, payload)
 
-    assert "X-API-Token" not in requests[0].headers
+    assert "X-API-Token" not in responses.calls[0].request.headers
 
 
+@responses.activate
 def test_a_rejected_request_raises(config):
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"error": "unauthorized"})
+    responses.add(responses.DELETE, "http://10.0.4.20/api/display/draw", json={"error": "unauthorized"}, status=401)
 
-    client = bar.open_client(config, transport=httpx.MockTransport(handler))
-    with client, pytest.raises(exceptions.BusyBarError):
-        bar.clear(client)
+    with pytest.raises(exceptions.BarError):
+        bar.clear(config)
+
+
+@responses.activate
+def test_a_connection_failure_retries_then_raises(config, monkeypatch):
+    monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
+    responses.add(
+        responses.POST,
+        "http://10.0.4.20/api/display/draw",
+        body=requests.exceptions.ConnectionError("boom"),
+    )
+
+    payload = bar.build_text_payload("BUILD OK")
+    with pytest.raises(exceptions.BarRequestError):
+        bar.draw_text(config, payload)
+
+    assert len(responses.calls) == bar.MAX_RETRIES + 1
