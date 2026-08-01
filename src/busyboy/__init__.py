@@ -1,2 +1,5 @@
-def main() -> None:
-    print("Hello from busyboy!")
+"""busyboy: display information on a BUSY Bar."""
+
+from busyboy.cli import main
+
+__all__ = ["main"]
