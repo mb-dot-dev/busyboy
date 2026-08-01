@@ -1,14 +1,17 @@
 """Tests for exit codes and output of the busyboy command line."""
 
 import json
+import re
 
 from click.testing import CliRunner
-import httpx
 import pytest
+import responses
 
-from busyboy import bar, cli
+from busyboy import cli
 
 ENV = {"BUSYBOY_HOST": "10.0.4.20", "BUSYBOY_TOKEN": "testtoken"}
+
+DRAW_URL_PATTERN = re.compile(r"^http://[^/]+/api/display/draw")
 
 
 @pytest.fixture(autouse=True)
@@ -22,26 +25,25 @@ class Recorder:
     """An in-memory stand-in for the bar, capturing what the CLI sends."""
 
     def __init__(self) -> None:
-        self.requests: list[httpx.Request] = []
+        self.requests: list = []
         self.status = 200
         self.body: dict[str, str] = {"result": "ok"}
 
-    def handle(self, request: httpx.Request) -> httpx.Response:
+    def callback(self, request):
         self.requests.append(request)
-        return httpx.Response(self.status, json=self.body)
+        return (self.status, {}, json.dumps(self.body))
 
 
 @pytest.fixture
-def recorder(monkeypatch):
-    """Route the CLI's client through a mock transport."""
+def recorder():
+    """Route the CLI's requests through a responses-registered callback."""
     recorder = Recorder()
-    real_open_client = bar.open_client
-
-    def fake_open_client(config, *, transport=None):
-        return real_open_client(config, transport=httpx.MockTransport(recorder.handle))
-
-    monkeypatch.setattr(cli.bar, "open_client", fake_open_client)
-    return recorder
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as mock:
+        mock.add_callback(responses.POST, DRAW_URL_PATTERN, callback=recorder.callback, content_type="application/json")
+        mock.add_callback(
+            responses.DELETE, DRAW_URL_PATTERN, callback=recorder.callback, content_type="application/json"
+        )
+        yield recorder
 
 
 def test_a_successful_draw_says_nothing(recorder):
@@ -57,7 +59,7 @@ def test_text_sends_the_string_to_the_bar(recorder):
 
     assert len(recorder.requests) == 1
     assert recorder.requests[0].method == "POST"
-    body = json.loads(recorder.requests[0].content)
+    body = json.loads(recorder.requests[0].body)
     assert body["elements"][0]["text"] == "BUILD OK"
 
 
@@ -68,7 +70,7 @@ def test_options_reach_the_payload(recorder):
         env=ENV,
     )
 
-    element = json.loads(recorder.requests[0].content)["elements"][0]
+    element = json.loads(recorder.requests[0].body)["elements"][0]
     assert element["color"] == "#FF0000FF"
     assert element["timeout"] == 30
     assert element["font"] == "small"
@@ -91,14 +93,14 @@ def test_clear_issues_a_delete(recorder):
 def test_host_flag_overrides_the_environment(recorder):
     CliRunner().invoke(cli.main, ["text", "hi", "--host", "192.168.1.5"], env=ENV)
 
-    assert recorder.requests[0].url.host == "192.168.1.5"
+    assert recorder.requests[0].url.startswith("http://192.168.1.5")
 
 
 def test_no_configuration_uses_the_usb_default_and_sends_no_token(recorder):
     result = CliRunner().invoke(cli.main, ["text", "hi"], env={})
 
     assert result.exit_code == 0
-    assert recorder.requests[0].url.host == "10.0.4.20"
+    assert recorder.requests[0].url.startswith("http://10.0.4.20")
     assert "X-API-Token" not in recorder.requests[0].headers
 
 
