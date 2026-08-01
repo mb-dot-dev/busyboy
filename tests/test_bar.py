@@ -11,6 +11,13 @@ from busyboy import bar
 from busyboy.config import load_config
 
 
+@pytest.fixture(autouse=True)
+def _clean_environment(monkeypatch):
+    """Keep the developer's own BUSYBOY_* variables out of these tests."""
+    monkeypatch.delenv("BUSYBOY_HOST", raising=False)
+    monkeypatch.delenv("BUSYBOY_TOKEN", raising=False)
+
+
 @pytest.fixture
 def config():
     return load_config(host="10.0.4.20", token="testtoken")

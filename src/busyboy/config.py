@@ -21,7 +21,7 @@ class BusyboyConfig(BaseSettings):
 
 
 class ConfigError(Exception):
-    """Raised when required connection settings are missing or malformed."""
+    """Raised when connection settings are malformed."""
 
 
 def load_config(
