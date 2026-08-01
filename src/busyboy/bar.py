@@ -1,7 +1,8 @@
 """Construction and delivery of BUSY Bar display payloads."""
 
+from importlib import resources
 import time
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_extra_types.color import Color
@@ -32,6 +33,26 @@ DEFAULT_SCROLL_RATE = 1200
 # display (glyphs occupy only rows 0-3). The condensed font's glyph box is 9
 # rows tall, so an explicit y=2 centers it on the 16-row display (rows 4-12).
 DEFAULT_TEXT_Y = 2
+
+IconName = Literal["success", "failure", "pending", "in_progress", "cancelled", "skipped"]
+ICON_NAMES: tuple[str, ...] = get_args(IconName)
+ASSETS_PACKAGE = "busyboy.assets"
+
+# Two-row workflow layout on the 72x16 front display: a 12x12 icon on the
+# left, and a text column beside it carrying both rows. See the hardware-facts
+# section of CLAUDE.md for how the row offsets were measured.
+ICON_SIZE = 12
+ICON_X = 2
+ICON_Y = 2
+TEXT_X = 18
+TEXT_WIDTH = FRONT_DISPLAY_WIDTH - TEXT_X
+ROW_ONE_Y = 1
+ROW_TWO_Y = 9
+ROW_FONT: DisplayFontName = "tiny"
+
+REPO_ELEMENT_ID = "repo"
+REF_ELEMENT_ID = "ref"
+ICON_ELEMENT_ID = "icon"
 
 DISPLAY_DRAW_PATH = "/api/display/draw"
 ASSET_UPLOAD_PATH = "/api/assets/upload"
@@ -64,6 +85,7 @@ class TextElement(BaseModel):
     color: str | None = Field(default=None, pattern=r"^#[0-9A-F]{8}$")
     timeout: int | None = Field(default=None, ge=0)
     display: DisplayName = "front"
+    x: int = 0
     y: int = 0
     width: int | None = Field(default=None, ge=1)
     scroll_rate: int | None = Field(default=None, ge=0)
@@ -74,11 +96,22 @@ class TextElement(BaseModel):
         return _normalize_color(value)
 
 
+class ImageElement(BaseModel):
+    """An image drawn from a file previously uploaded to the app's assets."""
+
+    id: str
+    type: Literal["image"] = "image"
+    path: str = Field(pattern=r"^[a-zA-Z0-9._/-]+$")
+    display: DisplayName = "front"
+    x: int = 0
+    y: int = 0
+
+
 class DisplayElements(BaseModel):
     """A draw request: one application's elements for the bar to render."""
 
     application_name: str
-    elements: list[TextElement] = Field(min_length=1)
+    elements: list[TextElement | ImageElement] = Field(min_length=1)
 
 
 def build_text_payload(
@@ -107,6 +140,37 @@ def build_text_payload(
         scroll_rate=scroll_rate,
     )
     return DisplayElements(application_name=APPLICATION_NAME, elements=[element])
+
+
+def _row(element_id: str, text: str, y: int) -> TextElement:
+    """Build one row of the workflow layout, scrolling when it overflows the column."""
+    return TextElement(
+        id=element_id,
+        text=text,
+        font=ROW_FONT,
+        display="front",
+        x=TEXT_X,
+        y=y,
+        width=TEXT_WIDTH,
+        scroll_rate=DEFAULT_SCROLL_RATE,
+    )
+
+
+def build_workflow_payload(*, repo_label: str, ref_label: str, icon: IconName) -> DisplayElements:
+    """
+    Build the two-row workflow layout: repository, pull request or branch, and a status icon.
+
+    Element ids are stable, so redrawing replaces the previous elements rather
+    than stacking new ones on top of them.
+    """
+    return DisplayElements(
+        application_name=APPLICATION_NAME,
+        elements=[
+            ImageElement(id=ICON_ELEMENT_ID, path=f"{icon}.png", display="front", x=ICON_X, y=ICON_Y),
+            _row(REPO_ELEMENT_ID, repo_label, ROW_ONE_Y),
+            _row(REF_ELEMENT_ID, ref_label, ROW_TWO_Y),
+        ],
+    )
 
 
 def _base_url(host: str) -> str:
@@ -203,3 +267,27 @@ def draw_text(config: BusyboyConfig, payload: DisplayElements) -> None:
 def clear(config: BusyboyConfig) -> None:
     """Remove what busyboy drew, without touching other applications' elements."""
     _request(config, "DELETE", DISPLAY_DRAW_PATH, params={"application_name": APPLICATION_NAME})
+
+
+def icon_bytes(icon: IconName) -> bytes:
+    """Read one packaged icon PNG."""
+    return (resources.files(ASSETS_PACKAGE) / f"{icon}.png").read_bytes()
+
+
+def upload_icons(config: BusyboyConfig) -> None:
+    """
+    Upload every status icon to the bar's asset store for this application.
+
+    The upload is unconditional: the bar's API has no endpoint that lists an
+    app's existing assets, and six ~200-byte requests cost less than the
+    machinery to avoid them.
+    """
+    for icon in ICON_NAMES:
+        _request(
+            config,
+            "POST",
+            ASSET_UPLOAD_PATH,
+            params={"application_name": APPLICATION_NAME, "file": f"{icon}.png"},
+            data=icon_bytes(cast(IconName, icon)),
+            content_type="application/octet-stream",
+        )
