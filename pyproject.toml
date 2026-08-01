@@ -28,7 +28,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-busylib = { git = "ssh://git@github.com/busy-app/busylib-py" }
+busylib = { git = "https://github.com/busy-app/busylib-py" }
 
 ##### TESTING #####
 

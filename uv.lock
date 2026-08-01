@@ -42,7 +42,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "busylib", git = "ssh://git@github.com/busy-app/busylib-py" },
+    { name = "busylib", git = "https://github.com/busy-app/busylib-py" },
     { name = "click", specifier = ">=8.4.2" },
 ]
 
@@ -57,7 +57,7 @@ dev = [
 [[package]]
 name = "busylib"
 version = "1.2.1.dev6+gb358af211"
-source = { git = "ssh://git@github.com/busy-app/busylib-py#b358af2113995585ad1fa15ec208121d8042dca3" }
+source = { git = "https://github.com/busy-app/busylib-py#b358af2113995585ad1fa15ec208121d8042dca3" }
 dependencies = [
     { name = "httpx" },
     { name = "pillow" },
