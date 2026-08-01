@@ -215,17 +215,22 @@ and its tests together, since neither half works without the other. `config.py` 
     `bar.time.sleep`).
   - `bar.open_client` **no longer exists** — Task 3 must not reference it.
 
-- [ ] **Step 1: Swap the dependency**
+- [ ] **Step 1: Add the new dependencies (do not remove busylib yet)**
 
 ```bash
-uv remove busylib
 uv add requests pydantic-extra-types
 uv add --group dev responses types-requests
 ```
 
-Expected: `pyproject.toml`'s `dependencies` list no longer has `busylib`, and now includes `requests` and
-`pydantic-extra-types`; the `dev` group gains `responses` and `types-requests`. `uv.lock` is updated
-automatically by these commands.
+Expected: `pyproject.toml`'s `dependencies` list now includes `requests` and `pydantic-extra-types`; the
+`dev` group gains `responses` and `types-requests`. `uv.lock` is updated automatically.
+
+**Do not run `uv remove busylib` in this task.** `src/busyboy/__init__.py` unconditionally does `from
+busyboy.cli import main`, and `cli.py` still imports `busylib` until Task 3 rewrites it — since `import
+busyboy` always runs `__init__.py`, uninstalling `busylib` now would break collection for every test module,
+not just `tests/test_bar.py` (there is no way to import `busyboy.bar` without Python first running
+`busyboy/__init__.py`). `busylib` stays listed as an unused dependency through the end of this task; Task 3
+removes it once `cli.py` no longer references it.
 
 - [ ] **Step 2: Replace the test file (red first)**
 
@@ -385,9 +390,11 @@ def test_a_connection_failure_retries_then_raises(config, monkeypatch):
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `uv run --frozen pytest tests/test_bar.py -v`
-Expected: FAIL/ERROR — `bar.py` still imports the now-removed `busylib` package, so collection fails
-(`ModuleNotFoundError: No module named 'busylib'`), or, if collection somehow succeeds, individual tests fail
-on the old `open_client`/`draw_text(client, payload)` signatures.
+Expected: FAIL — `busylib` is still installed at this point (Step 1 deliberately didn't remove it), so
+collection succeeds, but the old `bar.py` doesn't match the new test file: it has no `MAX_RETRIES` or `time`
+attribute, and `open_client`/`draw_text(client, payload)`/`clear(client)` don't match the new tests' calls
+(`bar.draw_text(config, payload)`, `bar.clear(config)`). Expect `AttributeError` or `TypeError` failures, not
+an import error.
 
 - [ ] **Step 4: Replace the implementation**
 
@@ -615,6 +622,7 @@ git commit -m "feat: replace busylib with requests in bar.py"
 ### Task 3: CLI wiring (`busyboy/cli.py`)
 
 **Files:**
+- Modify: `pyproject.toml`, `uv.lock` (via `uv remove busylib`)
 - Modify: `src/busyboy/cli.py`
 - Modify: `tests/test_cli.py` (full rewrite)
 
@@ -624,7 +632,21 @@ git commit -m "feat: replace busylib with requests in bar.py"
   `exceptions.BarError`, `exceptions.format_delivery_error` (Task 1).
 - Produces: no new public interface — `cli.main` is the Click group, unchanged from the outside.
 
-- [ ] **Step 1: Replace the test file (red first)**
+- [ ] **Step 1: Remove the busylib dependency**
+
+Task 2 deliberately left `busylib` installed (see its Step 1) because `src/busyboy/__init__.py`
+unconditionally imports `cli.py`, which until now still needed it. Once this task's Step 4 rewrites
+`cli.py`'s imports, nothing in the project references `busylib` anymore, so remove it first:
+
+```bash
+uv remove busylib
+```
+
+Expected: `pyproject.toml`'s `dependencies` list no longer has `busylib`. `uv.lock` updates automatically.
+This intentionally makes every test collection fail until Step 4 rewrites `cli.py` — that's the "red" state
+Step 3 below expects.
+
+- [ ] **Step 2: Replace the test file (red first)**
 
 Replace the full contents of `tests/test_cli.py`:
 
@@ -778,14 +800,13 @@ def test_verbose_on_a_successful_draw_still_exits_zero(recorder):
     assert result.exit_code == 0
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `uv run --frozen pytest tests/test_cli.py -v`
-Expected: FAIL — `cli.py` still imports `busylib` and calls the old `bar.open_client`/`bar.draw_text(client,
-payload)` signatures, so requests never reach the `responses` mock (or collection fails outright on the
-`busylib` import).
+Expected: FAIL/ERROR — `cli.py` still does `from busylib import exceptions, types`, and Step 1 just removed
+`busylib` from the environment, so collection fails with `ModuleNotFoundError: No module named 'busylib'`.
 
-- [ ] **Step 3: Update the implementation**
+- [ ] **Step 4: Update the implementation**
 
 In `src/busyboy/cli.py`, change the imports from:
 
@@ -850,20 +871,20 @@ In the `clear` command, replace the client/clear call:
     bar.clear(config)
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run --frozen pytest tests/test_cli.py -v`
 Expected: PASS (all tests).
 
-- [ ] **Step 5: Full test suite and lint**
+- [ ] **Step 6: Full test suite and lint**
 
 Run: `uv run --frozen pytest -v && uv run --frozen ruff check && uv run --frozen ruff format --check && uv run --frozen ty check`
 Expected: all pass. Fix anything reported.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/busyboy/cli.py tests/test_cli.py
+git add pyproject.toml uv.lock src/busyboy/cli.py tests/test_cli.py
 git commit -m "feat: wire cli.py to the requests-based bar.py and exceptions.py"
 ```
 
