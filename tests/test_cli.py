@@ -65,7 +65,7 @@ def test_text_sends_the_string_to_the_bar(recorder):
 def test_options_reach_the_payload(recorder):
     CliRunner().invoke(
         cli.main,
-        ["text", "hi", "--color", "red", "--timeout", "30", "--font", "small"],
+        ["text", "hi", "--color", "red", "--timeout", "30", "--font", "small", "--scroll-rate", "600"],
         env=ENV,
     )
 
@@ -73,6 +73,13 @@ def test_options_reach_the_payload(recorder):
     assert element["color"] == "#FF0000FF"
     assert element["timeout"] == 30
     assert element["font"] == "small"
+    assert element["scroll_rate"] == 600
+
+
+def test_token_flag_overrides_the_environment(recorder):
+    CliRunner().invoke(cli.main, ["text", "hi", "--token", "flagtoken"], env=ENV)
+
+    assert recorder.requests[0].headers["X-API-Token"] == "flagtoken"
 
 
 def test_clear_issues_a_delete(recorder):
