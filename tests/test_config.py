@@ -69,3 +69,15 @@ def test_the_token_stays_out_of_the_repr():
     config = load_config(host="10.0.4.20", token="supersecret")
 
     assert "supersecret" not in repr(config)
+
+
+def test_token_value_unwraps_a_configured_token():
+    config = load_config(host="10.0.4.20", token="supersecret")
+
+    assert config.token_value == "supersecret"
+
+
+def test_token_value_is_none_when_unset():
+    config = load_config()
+
+    assert config.token_value is None

@@ -43,7 +43,7 @@ def open_client(
     """
     return BusyBar(
         config.host,
-        token=config.token.get_secret_value() if config.token is not None else None,
+        token=config.token_value,
         transport=transport,
     )
 

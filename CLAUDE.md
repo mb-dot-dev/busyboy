@@ -35,6 +35,8 @@ knows nothing about argv or the environment, and `cli.py` holds no BUSY Bar payl
 - `src/busyboy/config.py` — `BusyboyConfig` (pydantic-settings, `env_prefix="BUSYBOY_"`, frozen), defaulting
   `host` to `10.0.4.20` and `token` to `None`, plus `load_config(*, host, token)` and `ConfigError`. Explicit
   arguments beat environment variables because pydantic-settings ranks init arguments above env sources.
+  `BusyboyConfig.token_value` encapsulates unwrapping the `SecretStr` (or returning `None`) so callers never
+  touch `get_secret_value()` directly.
 - `src/busyboy/bar.py` — `open_client`, `build_text_payload` (pure, no I/O), `draw_text`, `clear`, and the
   payload constants. This is where BUSY Bar knowledge lives.
 - `src/busyboy/cli.py` — the `main` Click group, the `text` and `clear` subcommands, and the

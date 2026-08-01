@@ -14,6 +14,11 @@ class BusyboyConfig(BaseSettings):
     host: str = "10.0.4.20"
     token: SecretStr | None = None
 
+    @property
+    def token_value(self) -> str | None:
+        """Unwrap the configured token, or None when no token is set."""
+        return self.token.get_secret_value() if self.token is not None else None
+
 
 class ConfigError(Exception):
     """Raised when required connection settings are missing or malformed."""
