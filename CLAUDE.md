@@ -30,29 +30,69 @@ commands use `--frozen` and expect the lockfile to already match.
 
 ## Architecture
 
-Four modules with one job each. Keep the boundaries: `config.py` imports neither Click nor `bar.py`, `bar.py`
-knows nothing about argv or the environment, and `cli.py` holds no BUSY Bar payload knowledge.
+Seven modules (plus a packaged asset directory) with one job each. Keep the boundaries: `config.py` imports
+neither Click nor `bar.py`; `bar.py` knows nothing about argv or the environment; `cli.py` holds no BUSY Bar
+payload knowledge; `git.py` knows nothing about GitHub, the bar, or Click; `github.py` knows nothing about the
+bar, Click, or `git.py`; and `watch.py` is the **only** module allowed to import both `bar` and `github` — it
+knows nothing about Click or argv itself. `git.py` and `github.py` must never import each other. That rule is
+why `git.origin_repo()` returns a bare `tuple[str, str]` rather than a `github.Repo`: a `git.py` function
+returning a GitHub-typed value would create exactly the import edge the boundary forbids, so `cli.py` — which
+is allowed to know about both — does the `github.Repo(owner=owner, name=name)` construction itself.
 
 - `src/busyboy/config.py` — `BusyboyConfig` (pydantic-settings, `env_prefix="BUSYBOY_"`, frozen), defaulting
   `host` to `10.0.4.20` and `token` to `None`, plus `load_config(*, host, token)` and `ConfigError`. Explicit
   arguments beat environment variables because pydantic-settings ranks init arguments above env sources.
   `BusyboyConfig.token_value` encapsulates unwrapping the `SecretStr` (or returning `None`) so callers never
   touch `get_secret_value()` directly.
-- `src/busyboy/bar.py` — `build_text_payload` (pure, no I/O), `draw_text`, `clear`, the payload constants, and
-  the `requests`-based transport itself: a `requests.request(...)` call per delivery, retried up to
-  `MAX_RETRIES` times with backoff on transport-level failures, raising `busyboy.exceptions.BarAPIError` or
-  `BarRequestError` on failure. This is where BUSY Bar knowledge lives — payload shape and delivery both.
-- `src/busyboy/exceptions.py` — `BarError` (base), `BarAPIError`, `BarRequestError`, and
-  `format_delivery_error(error) -> str`, the one-line renderer `cli.py` prints to stderr.
-- `src/busyboy/cli.py` — the `main` Click group, the `text` and `clear` subcommands, and the
-  error-to-exit-code mapping in `_handle_errors`.
+- `src/busyboy/git.py` — local checkout inspection only: `current_branch()`, `origin_repo()`, and
+  `parse_remote_url()` for the owner/name out of any remote URL form git accepts. Shells out to `git` via
+  `subprocess`, redacting any userinfo credentials embedded in a remote URL before they can reach a log line or
+  an exception message. Raises `GitError`. Knows nothing about GitHub's API, the bar, or Click.
+- `src/busyboy/github.py` — GitHub token resolution (`resolve_token`: `gh auth token`, then `GITHUB_TOKEN`) and
+  REST queries (`resolve_workflow`, `latest_run`, `pull_request_number`) via plain `requests` calls through the
+  single `_get` helper, which classifies every failure as fatal (`GitHubError`/`GitHubAuthError`) or retryable
+  (`GitHubTransientError`) — see Exception hierarchy below. Knows nothing about the bar, Click, or `git.py`.
+- `src/busyboy/bar.py` — `build_text_payload` and `build_workflow_payload` (both pure, no I/O), `draw_text`,
+  `clear`, `upload_icons`, the payload models (`TextElement`, `ImageElement`, `DisplayElements`), and the
+  `requests`-based transport itself. `_request` takes a `path` argument rather than a fixed endpoint, so it
+  serves `/api/display/draw` and `/api/assets/upload` alike; each call is retried up to `MAX_RETRIES` times with
+  backoff on transport-level failures, raising `busyboy.exceptions.BarAPIError` or `BarRequestError` on failure.
+  This is where all BUSY Bar knowledge lives — text and image element shape, the two-row workflow layout, asset
+  upload, and delivery.
+- `src/busyboy/watch.py` — the poll loop: `tick` (one fetch-render-diff-draw cycle) and `watch` (the `while
+  True`, Ctrl+C, and cleanup around it). The only module that imports both `bar` and `github`, because turning a
+  GitHub run into bar pixels is its entire job. Knows nothing about Click or argv — `cli.py` builds its
+  `Target` and passes it in.
+- `src/busyboy/exceptions.py` — the exception hierarchy (see below) and `format_delivery_error(error) -> str`,
+  the one-line renderer `cli.py` prints to stderr.
+- `src/busyboy/cli.py` — the `main` Click group; the `text` and `clear` subcommands; the `gh` subgroup and its
+  `workflow` subcommand; and the error-to-exit-code mapping in `_handle_errors`.
 - `src/busyboy/__init__.py` — re-exports `main` so `[project.scripts] busyboy = "busyboy:main"` keeps working.
   Do not put logic here.
+- `src/busyboy/assets/` — six packaged status icon PNGs (`success`, `failure`, `pending`, `in_progress`,
+  `cancelled`, `skipped`), 12x12, read by `bar.icon_bytes` via `importlib.resources`. Generated by
+  `tools/generate_icons.py` (stdlib-only, no image library dependency); regenerate rather than hand-edit.
 - Tests live in `tests/`, one module per source module.
 - Coverage config (`[tool.coverage.*]` in `pyproject.toml`) requires 75% coverage and measures branches over
-  `src`, excluding `if TYPE_CHECKING:` blocks. It currently sits around 92%.
+  `src`, excluding `if TYPE_CHECKING:` blocks. It currently sits around 95%.
 - Ruff is configured with a 120-char line length, double quotes, PEP 257 docstring convention, and isort settings
   that force sorting within sections and split on trailing commas.
+
+### Exception hierarchy
+
+The root is `BusyboyError`, not `BarError`. Beneath it: `BarError` (BUSY Bar delivery failures —
+`BarAPIError`, `BarRequestError`), `GitError` (local checkout inspection failures), and `GitHubError` (GitHub
+API failures), with `GitHubAuthError` and `GitHubTransientError` beneath `GitHubError`.
+
+This split is load-bearing, not cosmetic. `watch.tick` catches `GitHubTransientError` and `BarError` and
+swallows both, leaving the display as it was: a watch process is expected to outlive a laptop sleeping or a
+wifi hiccup, so a rate limit or a dropped bar connection just means "try again next tick." `GitHubAuthError` is
+deliberately **not** caught anywhere in `tick` — it propagates out and ends the watch, because a rejected token
+never self-heals. Writing `except GitHubError:` in that path to mean "fatal, stop the watch" would also catch
+`GitHubTransientError`, its own subclass, and swallow it there instead of re-raising — the loop would then
+retry forever against a revoked token rather than exiting, silently spinning instead of telling anyone the
+token is dead. Always catch `GitHubTransientError` and `GitHubAuthError` by their specific names when the
+retry-versus-exit distinction matters; catching their shared parent erases it.
 
 ### CLI contract
 
@@ -65,6 +105,27 @@ Configuration is `BUSYBOY_HOST` and `BUSYBOY_TOKEN`, both optional and overridab
 needs no configuration at all. `token` defaults to unset. A configured token is always sent as `X-API-Token`;
 an unset one is simply omitted from the request — there is no separate client "mode" to be in. Over WiFi (a
 non-default host) the token remains optional — supply one if the bar requires it.
+
+`busyboy gh workflow WORKFLOW` deliberately departs from the contract above once it's running: it does not
+exit after one action, it runs until Ctrl+C. Startup still follows the normal contract — resolving the GitHub
+token, the repo, the branch, and the workflow; the initial `bar.clear`; and `bar.upload_icons` all print one
+line to stderr and exit 1 on failure (no token, no git repo, an unknown workflow, a rejected credential, a
+failed icon upload). Once inside the poll loop, it stops behaving like every other command: transient GitHub
+failures (`GitHubTransientError`) and bar delivery failures (`BarError`) are swallowed rather than raised, and
+only logged at DEBUG — visible under `--verbose`, but they never print to stderr or end the process on their
+own. See Exception hierarchy above for why `GitHubAuthError` is the one GitHub failure that still ends the
+watch. A malformed `--repo` (anything that isn't `owner/name`) is a Click usage error and exits 2, like any
+other bad option.
+
+The GitHub token comes from `gh auth token` first, then the `GITHUB_TOKEN` environment variable
+(`github.resolve_token`). Neither source's value is ever written to a log line or an error message: `gh`'s own
+stderr is discarded specifically so a login diagnostic from the CLI can't carry a token into busyboy's output.
+
+Rate-limit handling lives in `github._get`: a 403 or 429 response that carries rate-limit evidence (a
+`Retry-After` header, or `x-ratelimit-remaining: 0`) is treated as transient and retried; `watch.watch` honours
+any `Retry-After` value by waiting at least that long before the next poll (`max(interval, retry_after)`
+instead of just `interval`). A 403 with neither signal present is GitHub rejecting the token outright, not
+rate limiting, and raises `GitHubAuthError` — fatal, per the hierarchy above.
 
 ## Gotchas
 
@@ -87,6 +148,31 @@ specifically to break that chain; keep it that way even though `host` and `token
 
 **`click.Choice` returns `str`**, so passing it to `bar.DisplayFontName` (a `Literal`) needs a `cast`. That
 cast is legitimate — the parser has already restricted the value.
+
+**`watch.watch`'s `sleep` parameter defaults to `None`, not `time.sleep`.** The body resolves it with `sleep if
+sleep is not None else time.sleep`. A default bound at function-definition time (`sleep: Callable = time.sleep`)
+would capture the real `time.sleep` at import time, before any test gets a chance to monkeypatch it — and the
+CLI tests depend on patching `time.sleep` to drive the loop without waiting, ending it by raising
+`KeyboardInterrupt` the way Ctrl+C does. Do not "simplify" this to a bound default; it would silently break
+every test that drives the loop.
+
+**`ruff format` formats Python code blocks inside Markdown files.** That's why `docs` and `.superpowers` are in
+`[tool.ruff] exclude` in `pyproject.toml` — without it, `make format` would rewrite fenced code examples in the
+design docs to match ruff's own style, including ones not meant to be syntactically valid Python on their own.
+
+**`ImageElement.path`'s pattern is deliberately narrower than the bar's own OpenAPI contract.** The vendor spec
+allows a broader character set there (letters, digits, `.`, `_`, `/`, `-`), which would let a traversal value
+like `../../etc/passwd` through. busyboy only ever constructs `path` as `f"{icon}.png"` from the closed
+`IconName` Literal, so the narrower pattern (`^[a-zA-Z0-9_-]+\.png$`) costs nothing and closes that hole. Do
+not widen it back to match the vendor spec.
+
+**`bar._to_displayable_ascii` sanitizes the workflow rows to `?`; `build_text_payload` still rejects non-ASCII
+outright.** That asymmetry is deliberate, not an inconsistency to fix. `busyboy text`'s input came from someone
+at a keyboard a moment ago, so rejecting it with a validation error is useful, actionable feedback. A workflow
+row's text is a repository or branch name fetched from GitHub in the middle of the poll loop — GitHub permits
+Unicode in both, and there is no user present at that moment to see or act on a rejection — so raising would
+just kill the watch on a value nobody typed. Sanitizing one-for-one instead keeps the loop alive and the
+display legible.
 
 ## Testing
 
@@ -121,7 +207,29 @@ Measured against a real bar by capturing frames from `/api/screen` and analysing
   16-row display (rows 4-12).
 - **Scope every element to `application_name`.** `display_clear()` without it wipes the whole display, including
   other applications' elements — pass `application_name=APPLICATION_NAME`, as the draw path does.
-- Elements carry a stable `id`, so redrawing replaces rather than stacks.
+- Elements carry a stable `id`, so redrawing replaces rather than stacks. This holds for `ImageElement` as well
+  as `TextElement` — it's why the two-row workflow layout's icon, repo row, and ref row (fixed ids `icon`,
+  `repo`, `ref`) can be redrawn on every change without ever stacking a duplicate on the panel.
+
+### Pending calibration (`gh workflow` two-row layout)
+
+The following are **unverified hypotheses, not measured facts** — flagged here, and in a comment at their
+definition in `bar.py`, specifically so nobody mistakes them for the confirmed measurements above. Do not
+promote them to this section as fact until they have actually been checked against a real bar; do not "correct"
+them based on reasoning alone.
+
+- `ROW_FONT` (`"tiny"`), `ROW_ONE_Y` (`1`), and `ROW_TWO_Y` (`9`) in `bar.py` were chosen by analogy with the
+  confirmed `condensed`/`DEFAULT_TEXT_Y` behaviour above (avoid the top-of-display clipping zone, fit a second
+  row's glyph box beneath the first within 16 rows), but the `tiny` font's actual glyph-box height has never
+  been measured on this device. It could clip, overlap, or have vertical dead space nobody has looked at yet.
+- Whether redrawing an element with the same `id` but different content or position **restarts its scroll
+  animation** or continues it from wherever it was is also unverified. `watch.tick`'s diff-before-draw design —
+  comparing the freshly rendered `Screen` to the previous one and calling `bar.draw_text` only when something
+  changed — implicitly assumes a redraw is safe to skip visually when nothing changed and produces a clean
+  redraw when something did. Neither half of that assumption has been checked against hardware.
+
+Calibrate both against a real bar (see frame capture below) before relying on them, and replace this entry with
+what was actually measured — not a stronger-sounding guess.
 
 ### Testing against a real bar
 
