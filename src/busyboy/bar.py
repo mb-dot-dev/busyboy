@@ -84,5 +84,5 @@ def draw_text(client: BusyBar, payload: types.DisplayElements) -> None:
 
 
 def clear(client: BusyBar) -> None:
-    """Remove what busyboy drew."""
-    client.display_clear()
+    """Remove what busyboy drew, without touching other applications' elements."""
+    client.display_clear(application_name=APPLICATION_NAME)

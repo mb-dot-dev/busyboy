@@ -111,6 +111,7 @@ def test_clear_deletes_the_drawing(config):
     assert len(requests) == 1
     assert requests[0].method == "DELETE"
     assert requests[0].url.path == "/api/display/draw"
+    assert requests[0].url.params["application_name"] == bar.APPLICATION_NAME
 
 
 def test_a_rejected_request_raises(config):
