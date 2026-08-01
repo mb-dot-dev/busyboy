@@ -1,7 +1,6 @@
 """Tests for exit codes and output of the busyboy command line."""
 
 import json
-import traceback
 
 from click.testing import CliRunner
 import httpx
@@ -95,12 +94,12 @@ def test_host_flag_overrides_the_environment(recorder):
     assert recorder.requests[0].url.host == "192.168.1.5"
 
 
-def test_missing_configuration_exits_one_and_names_the_variable():
+def test_no_configuration_uses_the_usb_default_and_sends_no_token(recorder):
     result = CliRunner().invoke(cli.main, ["text", "hi"], env={})
 
-    assert result.exit_code == 1
-    assert "BUSYBOY_HOST" in result.stderr
-    assert "BUSYBOY_TOKEN" in result.stderr
+    assert result.exit_code == 0
+    assert recorder.requests[0].url.host == "10.0.4.20"
+    assert "X-API-Token" not in recorder.requests[0].headers
 
 
 def test_a_rejected_request_exits_one(recorder):
@@ -144,27 +143,3 @@ def test_verbose_on_a_successful_draw_still_exits_zero(recorder):
     result = CliRunner().invoke(cli.main, ["text", "hi", "--verbose"], env=ENV)
 
     assert result.exit_code == 0
-
-
-def test_the_token_does_not_leak_under_verbose_when_config_is_missing():
-    """
-    Regression test for a token leak via chained tracebacks.
-
-    ConfigError used to chain the underlying pydantic ValidationError, whose
-    `missing` errors carry the whole pre-coercion input (including the raw
-    token) as `input_value`. Under --verbose the CLI re-raises instead of
-    swallowing the error, and Python prints the chained cause's traceback to
-    stderr, so the token ended up on the console.
-    """
-    result = CliRunner().invoke(
-        cli.main,
-        ["text", "hi", "--verbose"],
-        env={"BUSYBOY_TOKEN": "SUPERSECRETTOKEN123"},
-    )
-
-    assert "SUPERSECRETTOKEN123" not in result.output
-    assert "SUPERSECRETTOKEN123" not in result.stderr
-    assert result.exception is not None
-    assert "SUPERSECRETTOKEN123" not in "".join(
-        traceback.format_exception(type(result.exception), result.exception, result.exception.__traceback__)
-    )

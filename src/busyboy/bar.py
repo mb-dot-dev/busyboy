@@ -37,12 +37,13 @@ def open_client(
     Build a client for the configured bar.
 
     Passing both a host and a token puts busylib in network mode, which sends
-    the token as X-API-Token. `transport` exists so tests can substitute an
-    httpx.MockTransport.
+    the token as X-API-Token. A missing token is passed through as None, which
+    busylib sends without an auth header. `transport` exists so tests can
+    substitute an httpx.MockTransport.
     """
     return BusyBar(
         config.host,
-        token=config.token.get_secret_value(),
+        token=config.token_value,
         transport=transport,
     )
 

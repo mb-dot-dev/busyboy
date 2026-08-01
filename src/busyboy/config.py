@@ -11,12 +11,17 @@ class BusyboyConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="BUSYBOY_", frozen=True)
 
-    host: str
-    token: SecretStr
+    host: str = "10.0.4.20"
+    token: SecretStr | None = None
+
+    @property
+    def token_value(self) -> str | None:
+        """Unwrap the configured token, or None when no token is set."""
+        return self.token.get_secret_value() if self.token is not None else None
 
 
 class ConfigError(Exception):
-    """Raised when required connection settings are missing or malformed."""
+    """Raised when connection settings are malformed."""
 
 
 def load_config(
@@ -45,17 +50,6 @@ def load_config(
 
 
 def _format_config_error(error: ValidationError) -> str:
-    """
-    Render a config ValidationError naming both the env var and the flag.
-
-    A user hitting this may know about neither, so every missing field is
-    reported on its own line.
-    """
-    lines: list[str] = []
-    for detail in error.errors():
-        field = str(detail["loc"][0])
-        if detail["type"] == "missing":
-            lines.append(f"Missing configuration: BUSYBOY_{field.upper()} is not set (or pass --{field})")
-        else:
-            lines.append(f"Invalid configuration: {field}: {detail['msg']}")
+    """Render a config ValidationError naming the offending field."""
+    lines = [f"Invalid configuration: {detail['loc'][0]}: {detail['msg']}" for detail in error.errors()]
     return "\n".join(lines)

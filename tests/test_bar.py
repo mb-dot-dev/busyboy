@@ -11,6 +11,13 @@ from busyboy import bar
 from busyboy.config import load_config
 
 
+@pytest.fixture(autouse=True)
+def _clean_environment(monkeypatch):
+    """Keep the developer's own BUSYBOY_* variables out of these tests."""
+    monkeypatch.delenv("BUSYBOY_HOST", raising=False)
+    monkeypatch.delenv("BUSYBOY_TOKEN", raising=False)
+
+
 @pytest.fixture
 def config():
     return load_config(host="10.0.4.20", token="testtoken")
@@ -112,6 +119,22 @@ def test_clear_deletes_the_drawing(config):
     assert requests[0].method == "DELETE"
     assert requests[0].url.path == "/api/display/draw"
     assert requests[0].url.params["application_name"] == bar.APPLICATION_NAME
+
+
+def test_draw_text_omits_the_token_header_when_none_is_configured():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"result": "ok"})
+
+    config = load_config(host="10.0.4.20")
+    payload = bar.build_text_payload("BUILD OK")
+    client = bar.open_client(config, transport=httpx.MockTransport(handler))
+    with client:
+        bar.draw_text(client, payload)
+
+    assert "X-API-Token" not in requests[0].headers
 
 
 def test_a_rejected_request_raises(config):
