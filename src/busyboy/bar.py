@@ -35,7 +35,11 @@ DEFAULT_SCROLL_RATE = 1200
 DEFAULT_TEXT_Y = 2
 
 IconName = Literal["success", "failure", "pending", "in_progress", "cancelled", "skipped"]
-ICON_NAMES: tuple[str, ...] = get_args(IconName)
+# Unlike FONT_NAMES (kept as tuple[str, ...] because click.Choice wants Sequence[str]), ICON_NAMES never
+# touches Click — it's only iterated internally, so typing it tuple[IconName, ...] preserves the literal
+# type through iteration and avoids a cast at every use site. get_args() itself is untyped (tuple[Any, ...]),
+# so one cast here is unavoidable.
+ICON_NAMES: tuple[IconName, ...] = cast(tuple[IconName, ...], get_args(IconName))
 ASSETS_PACKAGE = "busyboy.assets"
 
 # Two-row workflow layout on the 72x16 front display: a 12x12 icon on the
@@ -101,7 +105,11 @@ class ImageElement(BaseModel):
 
     id: str
     type: Literal["image"] = "image"
-    path: str = Field(pattern=r"^[a-zA-Z0-9._/-]+$")
+    # The bar's own OpenAPI spec allows a broader pattern here (letters, digits, `.`, `_`, `/`, `-`), which
+    # would let a traversal-style value like "../../etc/passwd" through. busyboy only ever constructs
+    # `path` as f"{icon}.png" from the closed IconName Literal, so this is deliberately narrower than the
+    # vendor contract — do not widen it back to match the spec.
+    path: str = Field(pattern=r"^[a-zA-Z0-9_-]+\.png$")
     display: DisplayName = "front"
     x: int = 0
     y: int = 0
@@ -288,6 +296,6 @@ def upload_icons(config: BusyboyConfig) -> None:
             "POST",
             ASSET_UPLOAD_PATH,
             params={"application_name": APPLICATION_NAME, "file": f"{icon}.png"},
-            data=icon_bytes(cast(IconName, icon)),
+            data=icon_bytes(icon),
             content_type="application/octet-stream",
         )

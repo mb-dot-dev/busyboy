@@ -2,7 +2,6 @@
 
 import json
 import struct
-from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 from pydantic import ValidationError
@@ -205,7 +204,7 @@ def test_a_request_sends_a_raw_body_with_its_content_type(config):
 
 def test_every_icon_ships_as_a_12x12_rgba_png():
     for icon in bar.ICON_NAMES:
-        data = bar.icon_bytes(cast(bar.IconName, icon))
+        data = bar.icon_bytes(icon)
         assert data[:8] == b"\x89PNG\r\n\x1a\n"
         width, height, depth, colour_type = struct.unpack(">IIBB", data[16:26])
         assert (width, height, depth, colour_type) == (12, 12, 8, 6)
@@ -214,6 +213,16 @@ def test_every_icon_ships_as_a_12x12_rgba_png():
 def elements_by_id(payload):
     """Index a payload's elements by their stable element id."""
     return {element["id"]: element for element in payload.model_dump(exclude_none=True)["elements"]}
+
+
+def test_image_element_accepts_a_legitimate_icon_filename():
+    element = bar.ImageElement(id="icon", path="success.png")
+    assert element.path == "success.png"
+
+
+def test_image_element_rejects_a_path_traversal_style_path():
+    with pytest.raises(ValidationError):
+        bar.ImageElement(id="icon", path="../../etc/passwd")
 
 
 def test_the_workflow_payload_carries_two_rows_and_an_icon():
