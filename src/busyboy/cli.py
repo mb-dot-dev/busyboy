@@ -18,9 +18,8 @@ def _configure_logging(*, verbose: bool) -> None:
 
     --verbose raises the level to DEBUG, which is what turns on urllib3's own
     per-connection request logging (the standard way to see requests traffic).
-    Non-verbose runs need no configuration: unlike busylib, requests/urllib3
-    doesn't log HTTP error responses at error level, so there's no duplicate
-    message to silence.
+    Non-verbose runs need no configuration: requests/urllib3 doesn't log HTTP
+    error responses at error level, so there's no duplicate message to silence.
     """
     if verbose:
         logging.basicConfig(level=logging.DEBUG)

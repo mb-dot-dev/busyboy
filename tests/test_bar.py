@@ -162,3 +162,19 @@ def test_a_connection_failure_retries_then_raises(config, monkeypatch):
         bar.draw_text(config, payload)
 
     assert len(responses.calls) == bar.MAX_RETRIES + 1
+
+
+@responses.activate
+def test_a_non_transient_request_error_is_not_retried(config, monkeypatch):
+    monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
+    responses.add(
+        responses.POST,
+        "http://10.0.4.20/api/display/draw",
+        body=requests.exceptions.InvalidURL("bad url"),
+    )
+
+    payload = bar.build_text_payload("BUILD OK")
+    with pytest.raises(exceptions.BarRequestError):
+        bar.draw_text(config, payload)
+
+    assert len(responses.calls) == 1

@@ -35,9 +35,9 @@ DEFAULT_TEXT_Y = 2
 
 DISPLAY_DRAW_PATH = "/api/display/draw"
 
-# Matches busylib's previous defaults: a 5s cap on establishing the
-# connection, and a 10s cap on each individual socket read (not an
-# overall request budget — retries can each take up to 15s).
+# A 5s cap on establishing the connection, and a 10s cap on each individual
+# socket read (not an overall request budget — retries can each take up to
+# 15s).
 REQUEST_TIMEOUT = (5, 10)
 MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 0.25
@@ -147,7 +147,9 @@ def _request(
     Send one request to the bar, retrying transport-level failures.
 
     Only connection errors and timeouts are retried, up to MAX_RETRIES extra
-    attempts with growing backoff. An HTTP error response raises immediately.
+    attempts with growing backoff. An HTTP error response raises immediately,
+    and so does any other request failure (e.g. a malformed URL) — those are
+    deterministic, so retrying them would just add pointless backoff delay.
     """
     url = f"{_base_url(config.host)}{DISPLAY_DRAW_PATH}"
     headers = _auth_headers(config)
@@ -161,7 +163,7 @@ def _request(
                 json=json_body,
                 timeout=REQUEST_TIMEOUT,
             )
-        except requests.exceptions.RequestException as error:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
             if attempt >= MAX_RETRIES:
                 raise exceptions.BarRequestError(
                     str(error),
@@ -171,8 +173,18 @@ def _request(
                 ) from error
             time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
             continue
-        if response.status_code >= 400:
-            _raise_for_error_response(response, method=method)
+        except requests.exceptions.RequestException as error:
+            raise exceptions.BarRequestError(
+                str(error),
+                method=method,
+                path=DISPLAY_DRAW_PATH,
+                attempts=attempt + 1,
+            ) from error
+        try:
+            if response.status_code >= 400:
+                _raise_for_error_response(response, method=method)
+        finally:
+            response.close()
         return
 
 
