@@ -25,7 +25,10 @@ def _token_from_gh() -> str | None:
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
             check=False,
         )
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except OSError, subprocess.TimeoutExpired:
+        # OSError (which subsumes FileNotFoundError) covers gh being absent, not on PATH,
+        # or on PATH but not executable (PermissionError, NotADirectoryError, ...). None of
+        # those should block the GITHUB_TOKEN fallback below.
         return None
     if result.returncode != 0:
         # gh's stderr is deliberately discarded: it is a diagnostic about the
@@ -94,6 +97,24 @@ def _is_rate_limited(response: requests.Response) -> bool:
     return response.headers.get("x-ratelimit-remaining") == "0"
 
 
+def _parse_retry_after(value: str | None) -> float | None:
+    """
+    Parse the delta-seconds form of a Retry-After header.
+
+    GitHub sends delta-seconds (a plain integer count of seconds), never the
+    HTTP-date form, but this stays defensive: an HTTP-date or any other
+    unparseable value returns None rather than raising, so a caller just falls
+    back to its own normal interval instead of crashing on a header it cannot
+    read.
+    """
+    if value is None:
+        return None
+    try:
+        return float(int(value))
+    except ValueError:
+        return None
+
+
 def _get(token: str, path: str, params: dict[str, str] | None = None) -> Any:
     """
     GET one GitHub API path, classifying failures by whether retrying could help.
@@ -109,6 +130,10 @@ def _get(token: str, path: str, params: dict[str, str] | None = None) -> Any:
     a 429 with no such evidence is still transient, since 429 means rate
     limited by definition, while a 403 with no such evidence is a fatal auth
     failure.
+
+    When a rate-limited response carries a Retry-After header, its value is
+    attached to the raised GitHubTransientError as `retry_after` so the watch
+    loop can wait at least that long before polling again.
     """
     headers = {
         "Authorization": f"Bearer {token}",
@@ -121,7 +146,10 @@ def _get(token: str, path: str, params: dict[str, str] | None = None) -> Any:
         raise exceptions.GitHubTransientError(f"GET {path} failed: {error}") from error
     with response:
         if response.status_code == 429 or (response.status_code == 403 and _is_rate_limited(response)):
-            raise exceptions.GitHubTransientError(f"GitHub rate-limited GET {path} (HTTP {response.status_code})")
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            raise exceptions.GitHubTransientError(
+                f"GitHub rate-limited GET {path} (HTTP {response.status_code})", retry_after=retry_after
+            )
         if response.status_code in AUTH_STATUS_CODES:
             raise exceptions.GitHubAuthError(f"GitHub rejected the token (HTTP {response.status_code}) on GET {path}")
         if response.status_code >= 500:

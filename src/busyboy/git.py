@@ -33,8 +33,11 @@ def _run(*args: str) -> str:
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
             check=False,
         )
-    except FileNotFoundError as error:
-        raise exceptions.GitError("git is not installed or not on PATH") from error
+    except OSError as error:
+        # OSError (which subsumes FileNotFoundError) also covers git being on PATH but not
+        # executable (PermissionError, NotADirectoryError, ...) — none of that is a bug, so
+        # it must not escape as a raw traceback either.
+        raise exceptions.GitError("git is not installed, not on PATH, or not executable") from error
     except subprocess.TimeoutExpired as error:
         raise exceptions.GitError(f"git {' '.join(args)} timed out") from error
     if result.returncode != 0:

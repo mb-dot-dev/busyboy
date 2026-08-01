@@ -14,15 +14,32 @@ class GitError(BusyboyError):
 
 
 class GitHubError(BusyboyError):
-    """Raised when a GitHub API request fails in a way that will not self-heal."""
+    """
+    Base class for every GitHub API request failure busyboy raises.
+
+    Not all of these are fatal: GitHubTransientError below IS retryable, so
+    catching GitHubError alone to mean "unrecoverable" will also silently
+    swallow the retryable subclass. Catch GitHubTransientError specifically
+    when that distinction matters.
+    """
 
 
 class GitHubAuthError(GitHubError):
-    """Raised when GitHub rejects the token (401 or 403)."""
+    """Raised when GitHub rejects the token: always on 401, or on 403 when there's no rate-limit evidence."""
 
 
 class GitHubTransientError(GitHubError):
-    """Raised for failures worth retrying: 5xx responses, timeouts, dropped connections."""
+    """
+    Raised for failures worth retrying: 5xx responses, timeouts, dropped connections, and rate limiting.
+
+    `retry_after`, when GitHub's own Retry-After header specified a delay in
+    seconds, carries that value so a caller like watch.tick can wait at least
+    that long before the next poll instead of retrying on its usual interval.
+    """
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(message)
 
 
 class BarAPIError(BarError):

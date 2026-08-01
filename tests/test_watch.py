@@ -90,9 +90,10 @@ def test_a_tick_draws_the_current_state(config):
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
     responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
 
-    screen = watch.tick(config, TOKEN, TARGET, None)
+    result = watch.tick(config, TOKEN, TARGET, None)
 
-    assert screen == watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    assert result.screen == watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    assert result.retry_after is None
     assert len(responses.calls) == 3
 
 
@@ -107,9 +108,9 @@ def test_an_unchanged_state_is_not_redrawn(config):
     responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
 
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
-    screen = watch.tick(config, TOKEN, TARGET, previous)
+    result = watch.tick(config, TOKEN, TARGET, previous)
 
-    assert screen == previous
+    assert result.screen == previous
     assert not [call for call in responses.calls if call.request.method == "POST"]
 
 
@@ -124,10 +125,10 @@ def test_a_changed_state_is_redrawn(config):
     responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
 
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
-    screen = watch.tick(config, TOKEN, TARGET, previous)
+    result = watch.tick(config, TOKEN, TARGET, previous)
 
-    assert screen is not None
-    assert screen.icon == "failure"
+    assert result.screen is not None
+    assert result.screen.icon == "failure"
     assert [call for call in responses.calls if call.request.method == "POST"]
 
 
@@ -137,7 +138,7 @@ def test_a_transient_github_failure_keeps_the_previous_state(config):
 
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
 
-    assert watch.tick(config, TOKEN, TARGET, previous) == previous
+    assert watch.tick(config, TOKEN, TARGET, previous).screen == previous
 
 
 @responses.activate
@@ -146,7 +147,39 @@ def test_a_dropped_github_connection_keeps_the_previous_state(config):
 
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
 
-    assert watch.tick(config, TOKEN, TARGET, previous) == previous
+    assert watch.tick(config, TOKEN, TARGET, previous).screen == previous
+
+
+@responses.activate
+def test_a_rate_limited_response_carries_retry_after_into_the_result(config):
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"message": "rate limited"},
+        status=429,
+        headers={"Retry-After": "60"},
+    )
+
+    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    result = watch.tick(config, TOKEN, TARGET, previous)
+
+    assert result.screen == previous
+    assert result.retry_after == 60.0
+
+
+@responses.activate
+def test_an_unparseable_retry_after_leaves_retry_after_none(config):
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"message": "rate limited"},
+        status=429,
+        headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+    )
+
+    result = watch.tick(config, TOKEN, TARGET, None)
+
+    assert result.retry_after is None
 
 
 @responses.activate
@@ -168,10 +201,10 @@ def test_a_non_ascii_branch_name_completes_and_draws_instead_of_raising(config):
     responses.add(responses.GET, PULLS_URL, json=[])
     responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
 
-    screen = watch.tick(config, TOKEN, unicode_target, None)
+    result = watch.tick(config, TOKEN, unicode_target, None)
 
-    assert screen is not None
-    assert screen.icon == "success"
+    assert result.screen is not None
+    assert result.screen.icon == "success"
     assert [call for call in responses.calls if call.request.method == "POST"]
 
 
@@ -188,11 +221,12 @@ def test_an_unreachable_bar_keeps_the_previous_state(config, monkeypatch):
 
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
 
-    assert watch.tick(config, TOKEN, TARGET, previous) == previous
+    assert watch.tick(config, TOKEN, TARGET, previous).screen == previous
 
 
 @responses.activate
 def test_the_loop_uploads_icons_then_polls_until_interrupted(config):
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
     responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
     responses.add(
         responses.GET,
@@ -201,7 +235,6 @@ def test_the_loop_uploads_icons_then_polls_until_interrupted(config):
     )
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
     responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
 
     slept: list[float] = []
 
@@ -215,7 +248,79 @@ def test_the_loop_uploads_icons_then_polls_until_interrupted(config):
     assert slept == [10, 10]
     uploads = [call for call in responses.calls if "assets/upload" in (call.request.url or "")]
     assert len(uploads) == len(bar.ICON_NAMES)
-    assert [call for call in responses.calls if call.request.method == "DELETE"]
+    deletes = [call for call in responses.calls if call.request.method == "DELETE"]
+    assert len(deletes) == 2
+
+
+@responses.activate
+def test_clear_precedes_the_first_draw(config):
+    """A stale element from another busyboy invocation must be gone before the workflow layout is drawn."""
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
+    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
+    )
+    responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
+    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+
+    def sleep(seconds):
+        raise KeyboardInterrupt
+
+    watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
+
+    draw_calls = [
+        call for call in responses.calls if call.request.url is not None and "/api/display/draw" in call.request.url
+    ]
+    methods = [call.request.method for call in draw_calls]
+    assert methods.index("DELETE") < methods.index("POST")
+
+
+@responses.activate
+def test_the_loop_waits_at_least_retry_after_when_rate_limited(config):
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
+    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"message": "rate limited"},
+        status=429,
+        headers={"Retry-After": "60"},
+    )
+
+    slept: list[float] = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        raise KeyboardInterrupt
+
+    watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
+
+    assert slept == [60.0]
+
+
+@responses.activate
+def test_an_unparseable_retry_after_does_not_change_the_wait(config):
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
+    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"message": "rate limited"},
+        status=429,
+        headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+    )
+
+    slept: list[float] = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        raise KeyboardInterrupt
+
+    watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
+
+    assert slept == [10]
 
 
 @responses.activate
@@ -231,8 +336,9 @@ def test_an_interrupt_clears_the_display(config):
 
     watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
 
+    # One DELETE clears stale elements before the loop starts, a second clears on the way out.
     deletes = [call for call in responses.calls if call.request.method == "DELETE"]
-    assert len(deletes) == 1
+    assert len(deletes) == 2
 
 
 @responses.activate
@@ -250,6 +356,8 @@ def test_a_fatal_error_still_clears_the_display(config):
 @responses.activate
 def test_a_bar_that_dies_during_cleanup_does_not_mask_the_interrupt(config, monkeypatch):
     monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
+    # The first DELETE (the pre-loop clear) succeeds; the second (cleanup on exit) fails.
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
     responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
     responses.add(responses.GET, RUNS_URL, json={"workflow_runs": []})
     responses.add(responses.GET, PULLS_URL, json=[])
@@ -264,6 +372,7 @@ def test_a_bar_that_dies_during_cleanup_does_not_mask_the_interrupt(config, monk
 
 @responses.activate
 def test_a_failed_icon_upload_stops_before_the_loop(config):
+    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
     responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"error": "no"}, status=401)
 
     with pytest.raises(exceptions.BarError):

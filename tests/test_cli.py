@@ -133,12 +133,13 @@ def test_an_invalid_colour_exits_one(recorder):
     assert "color" in result.stderr
 
 
-def test_help_lists_both_subcommands():
+def test_help_lists_all_subcommands():
     result = CliRunner().invoke(cli.main, ["--help"])
 
     assert result.exit_code == 0
     assert "text" in result.output
     assert "clear" in result.output
+    assert "gh" in result.output
 
 
 def test_verbose_on_a_successful_draw_still_exits_zero(recorder):

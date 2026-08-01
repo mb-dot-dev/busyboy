@@ -43,8 +43,12 @@ ICON_NAMES: tuple[IconName, ...] = cast(tuple[IconName, ...], get_args(IconName)
 ASSETS_PACKAGE = "busyboy.assets"
 
 # Two-row workflow layout on the 72x16 front display: a 12x12 icon on the
-# left, and a text column beside it carrying both rows. See the hardware-facts
-# section of CLAUDE.md for how the row offsets were measured.
+# left, and a text column beside it carrying both rows.
+#
+# Unlike DEFAULT_SCROLL_RATE and DEFAULT_TEXT_Y above, ROW_ONE_Y, ROW_TWO_Y,
+# and ROW_FONT below are an UNVERIFIED HYPOTHESIS, not a measurement: the
+# "tiny" font's glyph-box height has never been measured against a real bar.
+# They must be calibrated against real hardware before being trusted.
 ICON_SIZE = 12
 ICON_X = 2
 ICON_Y = 2

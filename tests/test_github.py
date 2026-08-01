@@ -47,6 +47,14 @@ def test_the_environment_is_the_fallback_when_gh_is_absent(monkeypatch):
     assert github.resolve_token() == "ghp_fromenv"
 
 
+def test_the_environment_is_the_fallback_when_gh_is_not_executable(monkeypatch):
+    """gh present on PATH but not executable raises PermissionError, an OSError subclass, not FileNotFoundError."""
+    set_gh(monkeypatch, PermissionError("gh"))
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_fromenv")
+
+    assert github.resolve_token() == "ghp_fromenv"
+
+
 def test_the_environment_is_the_fallback_when_gh_is_logged_out(monkeypatch):
     set_gh(monkeypatch, FakeCompleted(stderr="not logged in", returncode=1))
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_fromenv")
@@ -248,6 +256,48 @@ def test_a_non_list_pulls_payload_is_transient_not_a_keyerror():
 
     with pytest.raises(exceptions.GitHubTransientError):
         github.pull_request_number(TOKEN, REPO, "feature/x")
+
+
+@responses.activate
+def test_a_retry_after_header_is_captured_on_the_transient_error():
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"message": "rate limited"},
+        status=429,
+        headers={"Retry-After": "60"},
+    )
+
+    with pytest.raises(exceptions.GitHubTransientError) as caught:
+        github.latest_run(TOKEN, REPO, 42, "main")
+
+    assert caught.value.retry_after == 60.0
+
+
+@responses.activate
+def test_an_unparseable_retry_after_header_is_ignored():
+    responses.add(
+        responses.GET,
+        RUNS_URL,
+        json={"message": "rate limited"},
+        status=429,
+        headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+    )
+
+    with pytest.raises(exceptions.GitHubTransientError) as caught:
+        github.latest_run(TOKEN, REPO, 42, "main")
+
+    assert caught.value.retry_after is None
+
+
+@responses.activate
+def test_a_non_rate_limited_transient_error_has_no_retry_after():
+    responses.add(responses.GET, RUNS_URL, json={"message": "oops"}, status=502)
+
+    with pytest.raises(exceptions.GitHubTransientError) as caught:
+        github.latest_run(TOKEN, REPO, 42, "main")
+
+    assert caught.value.retry_after is None
 
 
 @responses.activate

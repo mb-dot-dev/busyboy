@@ -54,6 +54,22 @@ class Screen:
     icon: bar.IconName
 
 
+@dataclasses.dataclass(frozen=True)
+class TickResult:
+    """
+    The outcome of one poll cycle.
+
+    `retry_after` is None on the ordinary path, meaning the caller should wait
+    the usual interval. It carries a value only when GitHub rate-limited the
+    request and told busyboy how many seconds to back off — see
+    `exceptions.GitHubTransientError.retry_after`. watch.py parses no HTTP
+    headers itself; it only reads this already-decoded value.
+    """
+
+    screen: Screen | None
+    retry_after: float | None = None
+
+
 def icon_for(run: github.Run | None) -> bar.IconName:
     """
     Map a run's state to a status icon.
@@ -82,25 +98,28 @@ def tick(
     token: str,
     target: Target,
     previous: Screen | None,
-) -> Screen | None:
+) -> TickResult:
     """
-    Run one poll cycle, returning the state now on the bar.
+    Run one poll cycle, returning the state now on the bar and how long to wait before the next one.
 
     Transient GitHub failures and bar delivery failures leave the display
     untouched and return `previous`: a watch process is expected to outlive a
     laptop sleeping or a wifi hiccup. Auth failures are not caught here — they
     never self-heal, so they propagate and end the watch.
+
+    A rate-limited GitHub response carries its `retry_after` through in the
+    result; every other path leaves it None, meaning "use the normal interval".
     """
     try:
         run = github.latest_run(token, target.repo, target.workflow_id, target.branch)
         pull_request = github.pull_request_number(token, target.repo, target.branch)
     except exceptions.GitHubTransientError as error:
         LOGGER.debug("GitHub request failed, keeping the display as it is: %s", error)
-        return previous
+        return TickResult(screen=previous, retry_after=error.retry_after)
 
     screen = render(target, run, pull_request)
     if screen == previous:
-        return previous
+        return TickResult(screen=previous)
 
     try:
         bar.draw_text(
@@ -113,8 +132,8 @@ def tick(
         )
     except exceptions.BarError as error:
         LOGGER.debug("Draw failed, keeping the display as it is: %s", error)
-        return previous
-    return screen
+        return TickResult(screen=previous)
+    return TickResult(screen=screen)
 
 
 def watch(
@@ -133,17 +152,30 @@ def watch(
     None rather than to time.sleep directly: a default bound at definition
     time cannot be monkeypatched, and the CLI tests patch time.sleep.
 
-    The display is cleared on the way out however the loop ends, including on a
-    fatal error: leaving a stale workflow status on the bar after the process
-    is gone would be worse than showing nothing.
+    The display is cleared once before the loop starts, not just on the way
+    out: draw replaces elements by id, it does not remove ones absent from the
+    payload, so any element left over from another busyboy invocation (e.g. a
+    persistent `busyboy text`) would otherwise sit on the panel, overlapping
+    the workflow layout, for the whole watch. This clear is scoped to
+    busyboy's own application_name (see bar.clear), so it cannot disturb
+    other applications' elements, and it is unconditional like upload_icons
+    right after it — if the bar cannot be reached before the loop even starts,
+    failing fast beats limping into a poll loop that can never draw.
+
+    The display is cleared again on the way out however the loop ends,
+    including on a fatal error: leaving a stale workflow status on the bar
+    after the process is gone would be worse than showing nothing.
     """
     pause = sleep if sleep is not None else time.sleep
+    bar.clear(config)
     bar.upload_icons(config)
     screen: Screen | None = None
     try:
         while True:
-            screen = tick(config, token, target, screen)
-            pause(interval)
+            result = tick(config, token, target, screen)
+            screen = result.screen
+            wait = interval if result.retry_after is None else max(interval, result.retry_after)
+            pause(wait)
     except KeyboardInterrupt:
         LOGGER.debug("Interrupted, clearing the display")
     finally:

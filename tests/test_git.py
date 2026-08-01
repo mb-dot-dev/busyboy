@@ -91,6 +91,18 @@ def test_a_missing_git_binary_raises(monkeypatch):
         git.current_branch()
 
 
+def test_a_non_executable_git_binary_raises(monkeypatch):
+    """git present on PATH but not executable raises PermissionError, an OSError subclass, not FileNotFoundError."""
+
+    def run(argv, **kwargs):
+        raise PermissionError("git")
+
+    monkeypatch.setattr(git.subprocess, "run", run)
+
+    with pytest.raises(exceptions.GitError, match="not installed"):
+        git.current_branch()
+
+
 def test_the_origin_remote_becomes_owner_and_name(fake_git):
     calls, result = fake_git
     result.stdout = "git@github.com:mb-dot-dev/busyboy.git\n"
