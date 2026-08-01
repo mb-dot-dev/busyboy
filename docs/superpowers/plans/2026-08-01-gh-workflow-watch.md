@@ -1136,31 +1136,16 @@ Expected: six blocks of ASCII art. Confirm each reads correctly at a glance — 
 
 Coverage measures `src` only (`source = ["src"]` in `pyproject.toml`), and `tools/` is outside it. No change needed — confirm with the coverage run in Step 6.
 
-- [ ] **Step 4: Write a test that the assets are real, loadable PNGs**
+The assets are covered by a test in Task 6, once `bar.ICON_NAMES` and `bar.icon_bytes` exist to read them through. Do not add that test here — it would leave this task's commit with a red suite.
 
-Add to `tests/test_bar.py`:
-
-```python
-def test_every_icon_ships_as_a_12x12_rgba_png():
-    for icon in bar.ICON_NAMES:
-        data = bar.icon_bytes(icon)
-        assert data[:8] == b"\x89PNG\r\n\x1a\n"
-        width, height, depth, colour_type = struct.unpack(">IIBB", data[16:26])
-        assert (width, height, depth, colour_type) == (12, 12, 8, 6)
-```
-
-Add `import struct` to the test module's imports (sorted: `import json`, `import struct`, then `from urllib.parse import urlparse`).
-
-This test depends on `bar.ICON_NAMES` and `bar.icon_bytes`, which Task 6 adds. Write the test now and expect it to fail until Task 6 lands; it is committed there.
-
-- [ ] **Step 5: Commit the generator and its output**
+- [ ] **Step 4: Commit the generator and its output**
 
 ```bash
 git add tools/generate_icons.py src/busyboy/assets
 git commit -m "feat: generate the six GitHub-style status icons"
 ```
 
-- [ ] **Step 6: Confirm the wheel carries the assets**
+- [ ] **Step 5: Confirm the wheel carries the assets**
 
 ```bash
 uv build --wheel
@@ -1193,6 +1178,14 @@ Expected: all six `busyboy/assets/*.png` paths listed. If any are missing, add a
 Add to `tests/test_bar.py`:
 
 ```python
+def test_every_icon_ships_as_a_12x12_rgba_png():
+    for icon in bar.ICON_NAMES:
+        data = bar.icon_bytes(icon)
+        assert data[:8] == b"\x89PNG\r\n\x1a\n"
+        width, height, depth, colour_type = struct.unpack(">IIBB", data[16:26])
+        assert (width, height, depth, colour_type) == (12, 12, 8, 6)
+
+
 def elements_by_id(payload):
     """Index a payload's elements by their stable element id."""
     return {element["id"]: element for element in payload.model_dump(exclude_none=True)["elements"]}
@@ -1268,7 +1261,7 @@ def test_a_failed_icon_upload_raises(config):
         bar.upload_icons(config)
 ```
 
-Extend the `urllib.parse` import in the test module to `from urllib.parse import parse_qs, urlparse`.
+Extend the `urllib.parse` import in the test module to `from urllib.parse import parse_qs, urlparse`, and add `import struct` (sorted: `import json`, `import struct`, then the `urllib.parse` line).
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1768,7 +1761,9 @@ git commit -m "feat: map workflow runs to a display state and draw on change"
 
 **Interfaces:**
 - Consumes: `watch.tick` (Task 7); `bar.upload_icons`, `bar.clear` (Task 6).
-- Produces: `watch.watch(config, token, target, *, interval=DEFAULT_INTERVAL_SECONDS, sleep=time.sleep) -> None`
+- Produces: `watch.watch(config, token, target, *, interval=DEFAULT_INTERVAL_SECONDS, sleep=None) -> None`
+
+**`sleep` must default to `None` and resolve to `time.sleep` inside the function body, not in the signature.** A `sleep=time.sleep` default binds at definition time, which would make `monkeypatch.setattr(watch.time, "sleep", ...)` a no-op — and Task 9's CLI tests rely on exactly that patch.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1874,24 +1869,27 @@ def watch(
     target: Target,
     *,
     interval: int = DEFAULT_INTERVAL_SECONDS,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
 ) -> None:
     """
     Poll until interrupted, then clear the display.
 
     `sleep` is injected so tests can drive the loop without waiting, and can
-    end it by raising KeyboardInterrupt the way Ctrl+C does.
+    end it by raising KeyboardInterrupt the way Ctrl+C does. It defaults to
+    None rather than to time.sleep directly: a default bound at definition
+    time cannot be monkeypatched, and the CLI tests patch time.sleep.
 
     The display is cleared on the way out however the loop ends, including on a
     fatal error: leaving a stale workflow status on the bar after the process
     is gone would be worse than showing nothing.
     """
+    pause = sleep if sleep is not None else time.sleep
     bar.upload_icons(config)
     screen: Screen | None = None
     try:
         while True:
             screen = tick(config, token, target, screen)
-            sleep(interval)
+            pause(interval)
     except KeyboardInterrupt:
         LOGGER.debug("Interrupted, clearing the display")
     finally:
