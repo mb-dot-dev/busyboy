@@ -114,6 +114,22 @@ def test_clear_deletes_the_drawing(config):
     assert requests[0].url.params["application_name"] == bar.APPLICATION_NAME
 
 
+def test_draw_text_omits_the_token_header_when_none_is_configured():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"result": "ok"})
+
+    config = load_config(host="10.0.4.20")
+    payload = bar.build_text_payload("BUILD OK")
+    client = bar.open_client(config, transport=httpx.MockTransport(handler))
+    with client:
+        bar.draw_text(client, payload)
+
+    assert "X-API-Token" not in requests[0].headers
+
+
 def test_a_rejected_request_raises(config):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "unauthorized"})

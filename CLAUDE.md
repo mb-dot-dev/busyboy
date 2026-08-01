@@ -32,9 +32,9 @@ commands use `--frozen` and expect the lockfile to already match.
 Three modules with one job each. Keep the boundaries: `config.py` imports neither Click nor busylib, `bar.py`
 knows nothing about argv or the environment, and `cli.py` holds no BUSY Bar payload knowledge.
 
-- `src/busyboy/config.py` — `BusyboyConfig` (pydantic-settings, `env_prefix="BUSYBOY_"`, frozen) plus
-  `load_config(*, host, token)` and `ConfigError`. Explicit arguments beat environment variables because
-  pydantic-settings ranks init arguments above env sources.
+- `src/busyboy/config.py` — `BusyboyConfig` (pydantic-settings, `env_prefix="BUSYBOY_"`, frozen), defaulting
+  `host` to `10.0.4.20` and `token` to `None`, plus `load_config(*, host, token)` and `ConfigError`. Explicit
+  arguments beat environment variables because pydantic-settings ranks init arguments above env sources.
 - `src/busyboy/bar.py` — `open_client`, `build_text_payload` (pure, no I/O), `draw_text`, `clear`, and the
   payload constants. This is where BUSY Bar knowledge lives.
 - `src/busyboy/cli.py` — the `main` Click group, the `text` and `clear` subcommands, and the
@@ -52,10 +52,12 @@ knows nothing about argv or the environment, and `cli.py` holds no BUSY Bar payl
 Success is silent with exit 0. Expected failures print one line to stderr and exit 1; Click usage errors exit 2.
 `--verbose` enables busylib request logging and lets the original exception propagate for a traceback.
 
-Configuration is `BUSYBOY_HOST` and `BUSYBOY_TOKEN`, both required, overridable per invocation with
-`--host` / `--token`. Passing both a host and a token puts busylib in "network" mode, which sends the token as
-`X-API-Token`; supplying only a token silently switches it to cloud mode and a `Bearer` header, which is why
-both are mandatory.
+Configuration is `BUSYBOY_HOST` and `BUSYBOY_TOKEN`, both optional and overridable per invocation with
+`--host` / `--token`. `host` defaults to `10.0.4.20`, busylib's own USB-subnet address, so a USB-connected bar
+needs no configuration at all. `token` defaults to unset. busyboy always passes `host` through to `open_client`,
+so busylib is always in "network" mode; a configured token is sent as `X-API-Token`, and an unset one is simply
+omitted from the request. Over WiFi (a non-default host) the token remains optional — supply one if the bar
+requires it.
 
 ## Gotchas
 
@@ -89,7 +91,8 @@ Python's last-resort handler and duplicate the CLI's own message. `cli.py` sets 
 **Never let pydantic's `ValidationError` into a traceback that a user sees.** Its `missing` errors carry the
 entire pre-coercion input dict as `input_value` — including the API token. `SecretStr` does not help, because
 the leak is of the raw input rather than the coerced field. `load_config` raises `ConfigError(...) from None`
-specifically to break that chain; keep it that way, and keep the regression test in `tests/test_cli.py`.
+specifically to break that chain; keep it that way even though `host` and `token` both have defaults now and no
+`missing` error can currently be produced — a future required field would reintroduce the same risk.
 
 **`click.Choice` returns `str`**, so passing it to a busylib `Literal` field needs a `cast`. That cast is
 legitimate — the parser has already restricted the value.
