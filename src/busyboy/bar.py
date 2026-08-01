@@ -17,9 +17,15 @@ FRONT_DISPLAY_WIDTH = 72
 DEFAULT_FONT: types.DisplayFontName = "condensed"
 FONT_NAMES: tuple[str, ...] = get_args(types.DisplayFontName)
 
-# Units are undocumented in busylib; see Task 5 for calibration against a
-# real bar.
-DEFAULT_SCROLL_RATE = 20
+# Measured against a real bar: scroll_rate is pixels per minute (higher is
+# faster), and text scrolls leftward. At 1200 the observed speed is ~18 px/s,
+# crossing the 72px display in roughly four seconds.
+DEFAULT_SCROLL_RATE = 1200
+
+# Measured against a real bar: align="center" clips text off the top of the
+# display (glyphs occupy only rows 0-3). The condensed font's glyph box is 9
+# rows tall, so an explicit y=2 centers it on the 16-row display (rows 4-12).
+DEFAULT_TEXT_Y = 2
 
 
 def open_client(
@@ -62,7 +68,7 @@ def build_text_payload(
         color=color,
         timeout=timeout,
         display=types.DisplayName.FRONT,
-        align="center",
+        y=DEFAULT_TEXT_Y,
         width=FRONT_DISPLAY_WIDTH,
         scroll_rate=scroll_rate,
     )

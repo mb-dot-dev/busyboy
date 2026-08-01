@@ -42,7 +42,7 @@ def test_defaults_centre_condensed_text_across_the_front_display():
 
     assert element["font"] == "condensed"
     assert element["display"] == "front"
-    assert element["align"] == "center"
+    assert element["y"] == bar.DEFAULT_TEXT_Y
     assert element["width"] == 72
     assert element["scroll_rate"] == bar.DEFAULT_SCROLL_RATE
 

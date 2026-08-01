@@ -112,7 +112,7 @@ def main() -> None:
     type=int,
     default=bar.DEFAULT_SCROLL_RATE,
     show_default=True,
-    help="Scroll speed for text wider than the display. 0 disables scrolling.",
+    help="Scroll speed in pixels per minute for text wider than the display. 0 disables scrolling.",
 )
 @_connection_options
 @_handle_errors
