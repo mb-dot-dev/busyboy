@@ -132,6 +132,8 @@ def test_a_rejected_request_raises(config):
     with pytest.raises(exceptions.BarError):
         bar.clear(config)
 
+    assert len(responses.calls) == 1
+
 
 @responses.activate
 def test_a_connection_failure_retries_then_raises(config, monkeypatch):
