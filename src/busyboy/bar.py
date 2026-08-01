@@ -34,6 +34,7 @@ DEFAULT_SCROLL_RATE = 1200
 DEFAULT_TEXT_Y = 2
 
 DISPLAY_DRAW_PATH = "/api/display/draw"
+ASSET_UPLOAD_PATH = "/api/assets/upload"
 
 # A 5s cap on establishing the connection, and a 10s cap on each individual
 # socket read (not an overall request budget — retries can each take up to
@@ -119,7 +120,7 @@ def _auth_headers(config: BusyboyConfig) -> dict[str, str]:
     return {"X-API-Token": token} if token else {}
 
 
-def _raise_for_error_response(response: requests.Response, *, method: str) -> None:
+def _raise_for_error_response(response: requests.Response, *, method: str, path: str) -> None:
     """Convert an HTTP error response into a BarAPIError."""
     try:
         payload = response.json()
@@ -132,16 +133,19 @@ def _raise_for_error_response(response: requests.Response, *, method: str) -> No
         code=code if isinstance(code, int) else None,
         status_code=response.status_code,
         method=method,
-        path=DISPLAY_DRAW_PATH,
+        path=path,
     )
 
 
 def _request(
     config: BusyboyConfig,
     method: str,
+    path: str,
     *,
     params: dict[str, str] | None = None,
     json_body: dict[str, object] | None = None,
+    data: bytes | None = None,
+    content_type: str | None = None,
 ) -> None:
     """
     Send one request to the bar, retrying transport-level failures.
@@ -151,8 +155,10 @@ def _request(
     and so does any other request failure (e.g. a malformed URL) — those are
     deterministic, so retrying them would just add pointless backoff delay.
     """
-    url = f"{_base_url(config.host)}{DISPLAY_DRAW_PATH}"
+    url = f"{_base_url(config.host)}{path}"
     headers = _auth_headers(config)
+    if content_type is not None:
+        headers["Content-Type"] = content_type
     for attempt in range(MAX_RETRIES + 1):
         try:
             response = requests.request(
@@ -161,6 +167,7 @@ def _request(
                 headers=headers,
                 params=params,
                 json=json_body,
+                data=data,
                 timeout=REQUEST_TIMEOUT,
             )
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
@@ -168,7 +175,7 @@ def _request(
                 raise exceptions.BarRequestError(
                     str(error),
                     method=method,
-                    path=DISPLAY_DRAW_PATH,
+                    path=path,
                     attempts=attempt + 1,
                 ) from error
             time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
@@ -177,12 +184,12 @@ def _request(
             raise exceptions.BarRequestError(
                 str(error),
                 method=method,
-                path=DISPLAY_DRAW_PATH,
+                path=path,
                 attempts=attempt + 1,
             ) from error
         try:
             if response.status_code >= 400:
-                _raise_for_error_response(response, method=method)
+                _raise_for_error_response(response, method=method, path=path)
         finally:
             response.close()
         return
@@ -190,9 +197,9 @@ def _request(
 
 def draw_text(config: BusyboyConfig, payload: DisplayElements) -> None:
     """Send a draw payload to the bar."""
-    _request(config, "POST", json_body=payload.model_dump(exclude_none=True))
+    _request(config, "POST", DISPLAY_DRAW_PATH, json_body=payload.model_dump(exclude_none=True))
 
 
 def clear(config: BusyboyConfig) -> None:
     """Remove what busyboy drew, without touching other applications' elements."""
-    _request(config, "DELETE", params={"application_name": APPLICATION_NAME})
+    _request(config, "DELETE", DISPLAY_DRAW_PATH, params={"application_name": APPLICATION_NAME})

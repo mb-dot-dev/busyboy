@@ -1,8 +1,28 @@
-"""Exception hierarchy for BUSY Bar delivery failures."""
+"""Exception hierarchy for expected busyboy failures."""
 
 
-class BarError(Exception):
+class BusyboyError(Exception):
+    """Base class for every failure busyboy expects and reports as one line."""
+
+
+class BarError(BusyboyError):
     """Base class for all busyboy BUSY Bar delivery exceptions."""
+
+
+class GitError(BusyboyError):
+    """Raised when inspecting the local git repository fails."""
+
+
+class GitHubError(BusyboyError):
+    """Raised when a GitHub API request fails in a way that will not self-heal."""
+
+
+class GitHubAuthError(GitHubError):
+    """Raised when GitHub rejects the token (401 or 403)."""
+
+
+class GitHubTransientError(GitHubError):
+    """Raised for failures worth retrying: 5xx responses, timeouts, dropped connections."""
 
 
 class BarAPIError(BarError):
@@ -46,8 +66,8 @@ class BarRequestError(BarError):
         super().__init__(f"{message} | {method} {path} | attempts={attempts}")
 
 
-def format_delivery_error(error: BarError) -> str:
-    """Render a BarError as a compact one-line diagnostic for stderr."""
+def format_delivery_error(error: BusyboyError) -> str:
+    """Render an expected failure as a compact one-line diagnostic for stderr."""
     if isinstance(error, BarAPIError):
         details = [f"HTTP {error.status_code}", f"{error.method} {error.path}", error.error]
         if error.code is not None:

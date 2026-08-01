@@ -50,7 +50,7 @@ def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
                 f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}" for detail in error.errors()
             )
             raise click.ClickException(f"Invalid value: {details}") from error
-        except exceptions.BarError as error:
+        except exceptions.BusyboyError as error:
             if verbose:
                 raise
             message = exceptions.format_delivery_error(error)

@@ -178,3 +178,24 @@ def test_a_non_transient_request_error_is_not_retried(config, monkeypatch):
         bar.draw_text(config, payload)
 
     assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_a_request_reports_the_path_it_actually_used(config):
+    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"error": "nope"}, status=401)
+
+    with pytest.raises(exceptions.BarAPIError) as caught:
+        bar._request(config, "POST", "/api/assets/upload", data=b"x", content_type="application/octet-stream")
+
+    assert caught.value.path == "/api/assets/upload"
+
+
+@responses.activate
+def test_a_request_sends_a_raw_body_with_its_content_type(config):
+    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"result": "ok"}, status=200)
+
+    bar._request(config, "POST", "/api/assets/upload", data=b"\x89PNG", content_type="application/octet-stream")
+
+    request = responses.calls[0].request
+    assert request.body == b"\x89PNG"
+    assert request.headers["Content-Type"] == "application/octet-stream"
