@@ -670,9 +670,7 @@ def recorder():
     """Route the CLI's requests through a responses-registered callback."""
     recorder = Recorder()
     with responses.RequestsMock(assert_all_requests_are_fired=False) as mock:
-        mock.add_callback(
-            responses.POST, DRAW_URL_PATTERN, callback=recorder.callback, content_type="application/json"
-        )
+        mock.add_callback(responses.POST, DRAW_URL_PATTERN, callback=recorder.callback, content_type="application/json")
         mock.add_callback(
             responses.DELETE, DRAW_URL_PATTERN, callback=recorder.callback, content_type="application/json"
         )
