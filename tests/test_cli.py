@@ -1,6 +1,7 @@
 """Tests for exit codes and output of the busyboy command line."""
 
 import json
+import traceback
 
 from click.testing import CliRunner
 import httpx
@@ -130,3 +131,33 @@ def test_help_lists_both_subcommands():
     assert result.exit_code == 0
     assert "text" in result.output
     assert "clear" in result.output
+
+
+def test_verbose_on_a_successful_draw_still_exits_zero(recorder):
+    result = CliRunner().invoke(cli.main, ["text", "hi", "--verbose"], env=ENV)
+
+    assert result.exit_code == 0
+
+
+def test_the_token_does_not_leak_under_verbose_when_config_is_missing():
+    """
+    Regression test for a token leak via chained tracebacks.
+
+    ConfigError used to chain the underlying pydantic ValidationError, whose
+    `missing` errors carry the whole pre-coercion input (including the raw
+    token) as `input_value`. Under --verbose the CLI re-raises instead of
+    swallowing the error, and Python prints the chained cause's traceback to
+    stderr, so the token ended up on the console.
+    """
+    result = CliRunner().invoke(
+        cli.main,
+        ["text", "hi", "--verbose"],
+        env={"BUSYBOY_TOKEN": "SUPERSECRETTOKEN123"},
+    )
+
+    assert "SUPERSECRETTOKEN123" not in result.output
+    assert "SUPERSECRETTOKEN123" not in result.stderr
+    assert result.exception is not None
+    assert "SUPERSECRETTOKEN123" not in "".join(
+        traceback.format_exception(type(result.exception), result.exception, result.exception.__traceback__)
+    )

@@ -36,7 +36,12 @@ def load_config(
     try:
         return BusyboyConfig(**overrides)
     except ValidationError as error:
-        raise ConfigError(_format_config_error(error)) from error
+        # `from None` breaks the exception chain deliberately: pydantic's
+        # ValidationError carries the raw pre-coercion input in __cause__,
+        # which includes the token. Chaining it would leak the token to
+        # stderr under --verbose, where cli.py re-raises and prints the
+        # traceback.
+        raise ConfigError(_format_config_error(error)) from None
 
 
 def _format_config_error(error: ValidationError) -> str:
