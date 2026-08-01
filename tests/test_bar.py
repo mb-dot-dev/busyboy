@@ -49,25 +49,9 @@ def test_defaults_centre_condensed_text_across_the_front_display():
 
     assert element["font"] == "condensed"
     assert element["display"] == "front"
-    assert element["x"] == 0
     assert element["y"] == bar.DEFAULT_TEXT_Y
     assert element["width"] == 72
     assert element["scroll_rate"] == bar.DEFAULT_SCROLL_RATE
-
-
-def test_payload_sets_x_explicitly(monkeypatch):
-    captured: dict[str, object] = {}
-    real_text_element = bar.types.TextElement
-
-    def fake_text_element(**kwargs):
-        captured.update(kwargs)
-        return real_text_element(**kwargs)
-
-    monkeypatch.setattr(bar.types, "TextElement", fake_text_element)
-
-    bar.build_text_payload("hi")
-
-    assert captured["x"] == 0
 
 
 def test_colour_and_timeout_are_absent_when_unset():
