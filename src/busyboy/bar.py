@@ -13,6 +13,7 @@ TEXT_ELEMENT_ID = "text"
 # The front display is a 72x16 RGB LED matrix; spanning its full width gives
 # scrolling text the whole panel to move across.
 FRONT_DISPLAY_WIDTH = 72
+FRONT_DISPLAY_X = 0
 
 DEFAULT_FONT: types.DisplayFontName = "condensed"
 FONT_NAMES: tuple[str, ...] = get_args(types.DisplayFontName)
@@ -69,6 +70,7 @@ def build_text_payload(
         color=color,
         timeout=timeout,
         display=types.DisplayName.FRONT,
+        x=FRONT_DISPLAY_X,
         y=DEFAULT_TEXT_Y,
         width=FRONT_DISPLAY_WIDTH,
         scroll_rate=scroll_rate,

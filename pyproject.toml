@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "busylib",
+    "busylib @ git+https://github.com/busy-app/busylib-py",
     "click>=8.4.2",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
@@ -28,9 +28,6 @@ dev = [
     "ruff>=0.16.1",
     "ty>=0.0.65",
 ]
-
-[tool.uv.sources]
-busylib = { git = "https://github.com/busy-app/busylib-py" }
 
 ##### TESTING #####
 
