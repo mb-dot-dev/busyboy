@@ -310,7 +310,7 @@ def test_defaults_centre_condensed_text_across_the_front_display():
 
     assert element["font"] == "condensed"
     assert element["display"] == "front"
-    assert element["align"] == "center"
+    assert element["y"] == bar.DEFAULT_TEXT_Y
     assert element["width"] == 72
     assert element["scroll_rate"] == bar.DEFAULT_SCROLL_RATE
 
@@ -419,9 +419,15 @@ FRONT_DISPLAY_WIDTH = 72
 DEFAULT_FONT: types.DisplayFontName = "condensed"
 FONT_NAMES: tuple[str, ...] = get_args(types.DisplayFontName)
 
-# Units are undocumented in busylib; see Task 5 for calibration against a
-# real bar.
-DEFAULT_SCROLL_RATE = 20
+# Measured against a real bar in Task 5: scroll_rate is pixels per minute
+# (px/s = rate/60), scrolling leftward, higher is faster. 1200 is ~18 px/s,
+# about four seconds to cross the 72px display.
+DEFAULT_SCROLL_RATE = 1200
+
+# align="center" clips text off the top of the front display (glyphs land in
+# rows 0-3). The condensed glyph box is 9 rows, so y=2 centers it on the
+# 16-row display (rows 4-12). Also measured in Task 5.
+DEFAULT_TEXT_Y = 2
 
 
 def open_client(
@@ -464,7 +470,7 @@ def build_text_payload(
         color=color,
         timeout=timeout,
         display=types.DisplayName.FRONT,
-        align="center",
+        y=DEFAULT_TEXT_Y,
         width=FRONT_DISPLAY_WIDTH,
         scroll_rate=scroll_rate,
     )
@@ -481,7 +487,7 @@ def draw_text(client: BusyBar, payload: types.DisplayElements) -> None:
 
 def clear(client: BusyBar) -> None:
     """Remove what busyboy drew."""
-    client.display_clear()
+    client.display_clear(application_name=APPLICATION_NAME)
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -992,9 +998,10 @@ Note which is comfortably readable, and whether higher numbers mean faster or sl
 Update `DEFAULT_SCROLL_RATE` in `src/busyboy/bar.py` to the chosen value and replace its comment with what was actually observed, for example:
 
 ```python
-# Units are undocumented in busylib. Measured on firmware <version>: higher is
-# faster, and 20 scrolls a full-width string across in roughly four seconds.
-DEFAULT_SCROLL_RATE = 20
+# Measured against a real bar: scroll_rate is pixels per minute
+# (px/s = rate/60), scrolling leftward, higher is faster. 1200 is ~18 px/s,
+# about four seconds to cross the 72px display.
+DEFAULT_SCROLL_RATE = 1200
 ```
 
 - [ ] **Step 4: Update the test if the default changed**
@@ -1019,6 +1026,21 @@ Expected: all green.
 git add src/busyboy/bar.py src/busyboy/cli.py tests/test_bar.py
 git commit -m "fix: calibrate timeout and scroll rate against hardware"
 ```
+
+**Outcome (recorded after execution).** Measured by capturing frames from `/api/screen`
+and analysing horizontal pixel shift rather than by stopwatch, which is more precise and
+is what the steps above should have specified:
+
+- `timeout` **is in seconds**. `--timeout 10` held the frame steady through t=10s and had
+  cleared by t=12s. No conversion was needed, so Step 4's contingency test was not added.
+- `scroll_rate` **is pixels per minute** (px/s ≈ rate/60), leftward, higher is faster:
+  300 → 4.4 px/s, 600 → 10.4, 1200 → 17.8, 1800 → 29.0, 2400 → 36.7. The default is now
+  `1200`. Note that Step 2's sweep of `5 10 20 40 80` is uselessly narrow given this scale —
+  every value in it reads as frozen. Sweep hundreds to thousands instead.
+- A third defect surfaced that this task had not anticipated: **`align="center"` clips text
+  off the top** of the display (glyphs land in rows 0-3). Replaced with `DEFAULT_TEXT_Y = 2`,
+  which centers the 9-row `condensed` glyph box on the 16-row display. The snippets in
+  Task 2 above are corrected accordingly.
 
 ---
 

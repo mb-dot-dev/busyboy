@@ -99,8 +99,15 @@ caller passes only the flags that were actually supplied:
 BusyboyConfig(**{k: v for k, v in (("host", host), ("token", token)) if v is not None})
 ```
 
-`SecretStr` keeps the token out of reprs, logs, and tracebacks. It is unwrapped with
+`SecretStr` keeps the token out of reprs and logs. It is unwrapped with
 `.get_secret_value()` at exactly one place: where `bar.py` constructs the client.
+
+**`SecretStr` alone does not keep the token out of tracebacks** — corrected during
+implementation, see "Post-implementation corrections" below. It masks the *coerced field*,
+but a pydantic `ValidationError` carries the raw pre-coercion input dict as `input_value`,
+token included. Under `--verbose`, which re-raises rather than swallowing the exception,
+a chained `ValidationError` therefore prints the token to stderr. `load_config` raises
+`ConfigError(...) from None` specifically to break that chain. Do not remove it.
 
 ### `bar.py`
 
@@ -122,9 +129,9 @@ The payload:
 | `type` | `"text"` | |
 | `display` | `FRONT` | The 72x16 RGB matrix |
 | `font` | `"condensed"` by default | Fits more on a small display than `normal` |
-| `align` | `"center"` | Centered is right for a single short string |
+| `y` | `2` | Centers the 9-row `condensed` glyph box on the 16-row display. **Corrected:** originally `align="center"`, which clips text off the top on real hardware |
 | `width` | `72` | Full display width, so scrolling spans it |
-| `scroll_rate` | default, `--scroll-rate` overrides | Overflow marquees instead of truncating |
+| `scroll_rate` | default, `--scroll-rate` overrides | Overflow marquees instead of truncating. Denominated in pixels per minute; default `1200` (~18 px/s) |
 | `color` | omitted unless `--color` | Firmware default applies |
 | `timeout` | omitted unless `--timeout` | Persists by default |
 
@@ -209,7 +216,7 @@ flag-overrides-env; missing host; missing token; token not exposed in `repr`. Us
 
 `tests/test_bar.py` — `build_text_payload` asserted as a serialized dict: element id and
 application name, `condensed` as the default font, `color` and `timeout` absent when not
-passed and present when they are, `width` and `align` set, scroll rate applied. Then
+passed and present when they are, `width` and `y` set, scroll rate applied. Then
 `draw_text` and `clear` driven through a real `BusyBar` wired to an
 `httpx.MockTransport` that captures the request — asserting POST to
 `/api/display/draw` with the expected body, DELETE for clear, and the `X-API-Token`
@@ -252,3 +259,38 @@ confirmed against a real device before the defaults are fixed:
 
 Treat both as an explicit implementation step: run it against the hardware, observe,
 then commit the constant with a comment recording what was observed.
+
+## Post-implementation corrections
+
+Recorded after the design was implemented and measured against a real bar. The sections
+above have been corrected in place; this section records what changed and why, so the
+reasoning is not lost.
+
+**The two open items above, resolved.** Measured by capturing frames from `/api/screen`
+and analysing horizontal pixel shift:
+
+- `timeout` **is in seconds** — `--timeout 10` held the frame steady through t=10s and had
+  cleared by t=12s. No conversion was needed; the contingency in item 1 did not apply.
+- `scroll_rate` **is pixels per minute** (px/s ≈ rate/60), scrolling leftward, higher is
+  faster. Measured: 300 → 4.4 px/s, 600 → 10.4, 1200 → 17.8, 1800 → 29.0, 2400 → 36.7.
+  The default is `1200` (~18 px/s, about four seconds to cross the display).
+
+**Three things the design got wrong**, each found during implementation:
+
+1. **`align="center"` clips text off the top** of the front display — glyphs land in rows
+   0-3. The payload uses an explicit `y=2` instead, which centers the 9-row `condensed`
+   glyph box on the 16-row display. The payload table and the testing section are
+   corrected above.
+2. **`SecretStr` does not keep the token out of tracebacks**, contrary to the claim in the
+   Configuration section. See the correction there — the `from None` in `load_config` is
+   load-bearing.
+3. **`display_clear()` must be scoped to `application_name`.** The design described `clear`
+   as "removing what busyboy drew", but an unscoped `DELETE /api/display/draw` wipes the
+   whole display including other applications' elements. The draw path was already scoped;
+   the clear path was not.
+
+A fourth item is an implementation detail rather than a design error, but is worth
+recording: busylib's `SyncClientBase.__enter__` returns `SyncClientBase`, not `Self`, so
+`with open_client(...) as client:` does not type-check where `client` is passed to
+functions annotated `BusyBar`. Bind the client first, then use the binding as the context
+manager.
