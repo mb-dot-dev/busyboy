@@ -69,9 +69,9 @@ and skips the draw when nothing moved. Re-sending an identical payload every 10 
 restart the repo-name scroll animation, so a name longer than the text column would never finish
 crossing the display.
 
-This rests on an unverified assumption — that redrawing an element restarts its scroll. Verify it
-against the real bar during implementation. If redraws turn out not to reset scroll position, the
-diff is still worth keeping (it removes pointless traffic), just no longer load-bearing.
+**Confirmed against a real bar.** When a watched workflow's status changed and the tick issued a
+redraw, the scrolling repo row jumped back to its starting position rather than continuing. The diff
+is therefore load-bearing, not merely a traffic optimisation.
 
 ## Authentication
 
@@ -137,14 +137,14 @@ Both rows are `TextElement`s with `width=54`. They keep stable `id`s (`repo`, `r
 redraw replaces rather than stacks, and the whole payload is scoped to `application_name="busyboy"`
 so it never disturbs other applications.
 
-### Row geometry is unverified
+### Row geometry, measured
 
 `CLAUDE.md` records the `condensed` glyph box as 9 rows tall — too tall to stack twice inside 16
-pixels. `tiny` and `small` have never been measured on this hardware.
+pixels, which is why the rows use `tiny`.
 
-Implementation must calibrate against a real bar before fixing the font and the two `y` offsets.
-The starting hypothesis is `tiny` at `y=1` and `y=9`. Whatever the calibration finds goes into the
-hardware-facts section of `CLAUDE.md`, since the OpenAPI spec documents none of it.
+**Confirmed against a real bar:** `tiny` stacks twice at `y=1` and `y=9`, both rows fully visible,
+neither clipped at the top nor overlapping. These values now live in the hardware-facts section of
+`CLAUDE.md`, since the OpenAPI spec documents none of it.
 
 Do not use `align` to position the rows. It is already known to clip text off the top of the front
 display; position with explicit `y`.

@@ -210,26 +210,15 @@ Measured against a real bar by capturing frames from `/api/screen` and analysing
 - Elements carry a stable `id`, so redrawing replaces rather than stacks. This holds for `ImageElement` as well
   as `TextElement` — it's why the two-row workflow layout's icon, repo row, and ref row (fixed ids `icon`,
   `repo`, `ref`) can be redrawn on every change without ever stacking a duplicate on the panel.
-
-### Pending calibration (`gh workflow` two-row layout)
-
-The following are **unverified hypotheses, not measured facts** — flagged here, and in a comment at their
-definition in `bar.py`, specifically so nobody mistakes them for the confirmed measurements above. Do not
-promote them to this section as fact until they have actually been checked against a real bar; do not "correct"
-them based on reasoning alone.
-
-- `ROW_FONT` (`"tiny"`), `ROW_ONE_Y` (`1`), and `ROW_TWO_Y` (`9`) in `bar.py` were chosen by analogy with the
-  confirmed `condensed`/`DEFAULT_TEXT_Y` behaviour above (avoid the top-of-display clipping zone, fit a second
-  row's glyph box beneath the first within 16 rows), but the `tiny` font's actual glyph-box height has never
-  been measured on this device. It could clip, overlap, or have vertical dead space nobody has looked at yet.
-- Whether redrawing an element with the same `id` but different content or position **restarts its scroll
-  animation** or continues it from wherever it was is also unverified. `watch.tick`'s diff-before-draw design —
-  comparing the freshly rendered `Screen` to the previous one and calling `bar.draw_text` only when something
-  changed — implicitly assumes a redraw is safe to skip visually when nothing changed and produces a clean
-  redraw when something did. Neither half of that assumption has been checked against hardware.
-
-Calibrate both against a real bar (see frame capture below) before relying on them, and replace this entry with
-what was actually measured — not a stronger-sounding guess.
+- **The `tiny` font stacks twice within the 16-row display**, at `y=1` and `y=9`, with both rows fully visible —
+  neither clipped at the top the way `align="center"` clips, nor overlapping each other. This is what
+  `ROW_FONT`, `ROW_ONE_Y`, and `ROW_TWO_Y` in `bar.py` encode. `condensed` (9 rows) cannot be stacked twice.
+- **Redrawing an element restarts its scroll animation.** Confirmed on a real bar: when a watched workflow's
+  status changed and `watch.tick` issued a redraw, the scrolling repo row jumped back to its starting position
+  rather than continuing from where it was. This is why `tick` compares the freshly rendered `Screen` against
+  the previous one and skips `bar.draw_text` entirely when nothing changed — an unconditional redraw every poll
+  interval would restart the scroll every time, so a repo slug wider than the 54px text column would never
+  finish a single traverse. The diff is load-bearing, not an optimisation. Do not remove it.
 
 ### Testing against a real bar
 
