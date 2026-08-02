@@ -185,14 +185,14 @@ at a keyboard a moment ago, so rejecting it with a validation error is useful, a
 row's text is a repository or branch name fetched from GitHub in the middle of the poll loop — GitHub permits
 Unicode in both, and there is no user present at that moment to see or act on a rejection — so raising would
 just kill the watch on a value nobody typed. Sanitizing one-for-one instead keeps the loop alive and the
-display legible. `bar.strip_undisplayable` is a third point on that same spectrum, and the three are not redundant. Reject
-outright (`build_text_payload`) for text a human typed a moment ago and can retype. Replace one-for-one
-(`_to_displayable_ascii`) for a whole row, where dropping characters could empty it and trip
-`TextElement.text`'s `min_length=1` mid-poll-loop, killing the watch over a value nobody typed. Drop and
-collapse (`strip_undisplayable`) for one *component* of a row — the workflow name — where the ref beside it
-already guarantees the row is non-empty, so a name like "🚀 Deploy" can read as "Deploy" instead of
-"? Deploy". Collapsing the two private-looking helpers into one would either put stray `?`s back in front of
-emoji-prefixed workflow names or reintroduce the empty-row crash. Keep all three.
+display legible. `bar.strip_undisplayable` is a third point on that same spectrum, and the three are not
+redundant. Reject outright (`build_text_payload`) for text a human typed a moment ago and can retype.
+Replace one-for-one (`_to_displayable_ascii`) for a whole row, where dropping characters could empty it
+and trip `TextElement.text`'s `min_length=1` mid-poll-loop, killing the watch over a value nobody typed.
+Drop and collapse (`strip_undisplayable`) for one *component* of a row — the workflow name — where the
+ref beside it already guarantees the row is non-empty, so a name like "🚀 Deploy" can read as "Deploy"
+instead of "? Deploy". Collapsing the two private-looking helpers into one would either put stray `?`s
+back in front of emoji-prefixed workflow names or reintroduce the empty-row crash. Keep all three.
 
 ## Testing
 
