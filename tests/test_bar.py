@@ -258,6 +258,11 @@ def test_the_icon_and_text_column_fit_the_front_display():
     assert bar.TEXT_X + bar.TEXT_WIDTH == bar.FRONT_DISPLAY_WIDTH
 
 
+def test_the_front_display_is_seventy_two_by_sixteen():
+    assert bar.FRONT_DISPLAY_WIDTH == 72
+    assert bar.FRONT_DISPLAY_HEIGHT == 16
+
+
 def test_workflow_element_ids_are_stable_so_a_redraw_replaces():
     first = elements_by_id(bar.build_workflow_payload(repo_label="a/b", ref_label="#1", icon="success"))
     second = elements_by_id(bar.build_workflow_payload(repo_label="c/d", ref_label="#2", icon="failure"))

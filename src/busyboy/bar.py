@@ -17,6 +17,7 @@ TEXT_ELEMENT_ID = "text"
 # The front display is a 72x16 RGB LED matrix; spanning its full width gives
 # scrolling text the whole panel to move across.
 FRONT_DISPLAY_WIDTH = 72
+FRONT_DISPLAY_HEIGHT = 16
 
 DisplayFontName = Literal["tiny", "small", "normal", "condensed", "bold", "large", "extra_large", "global"]
 DEFAULT_FONT: DisplayFontName = "condensed"
