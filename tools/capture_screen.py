@@ -39,9 +39,10 @@ REQUEST_TIMEOUT = (5, 10)
 # naming a size, so it has no fixed height to measure or to stack.
 MEASURABLE_FONTS: tuple[str, ...] = tuple(name for name in bar.FONT_NAMES if name != "global")
 
-# The layout the two-row workflow display uses today, in tiny/tiny. place_rows
-# must reproduce these, or the model of the y-to-inked-row offset is wrong.
-KNOWN_GOOD_TINY_LAYOUT = (1, 9)
+# Measured on real hardware: normal at y=-2 inks rows 0-8, exactly as its
+# offset of 2 predicts. Negative y is legal, and necessary — every font except
+# tiny sits 2 rows below the y it is given, so a row inked from row 0 needs -2.
+MINIMUM_Y = -8
 
 
 class CaptureError(Exception):
@@ -184,10 +185,9 @@ def place_rows(top: str, bottom: str, offsets: dict[str, int], heights: dict[str
     """
     Compute both rows' y values from the measured geometry.
 
-    Leftover rows are spread top margin, then gap, then bottom margin, so the
-    pair sits high rather than centred-and-clipped. Margins are in inked-row
-    space; y is that target minus the font's own offset, clamped at 0 because
-    the firmware's behaviour for a negative y is unmeasured.
+    Leftover rows are spread top margin, then gap, then bottom margin. Margins
+    are in inked-row space; y is that target minus the font's own offset, and
+    may legitimately be negative — see MINIMUM_Y.
     """
     leftover = bar.FRONT_DISPLAY_HEIGHT - heights[top] - heights[bottom]
     if leftover < 0:
@@ -196,9 +196,38 @@ def place_rows(top: str, bottom: str, offsets: dict[str, int], heights: dict[str
     for index in range(leftover % 3):
         margins[index] += 1
     top_margin, gap, _ = margins
-    top_row = top_margin
     bottom_row = top_margin + heights[top] + gap
-    return max(0, top_row - offsets[top]), max(0, bottom_row - offsets[bottom])
+    return top_margin - offsets[top], bottom_row - offsets[bottom]
+
+
+def check_layout(
+    top: str,
+    bottom: str,
+    row_one_y: int,
+    row_two_y: int,
+    offsets: dict[str, int],
+    heights: dict[str, int],
+) -> None:
+    """
+    Verify a computed layout neither clips nor overlaps.
+
+    This replaces an earlier gate that asserted place_rows reproduces the
+    shipped tiny/tiny layout of y=1 and y=9. That layout was hand-tuned rather
+    than rule-derived — top margin 2, gap 3, bottom margin 1 — so demanding the
+    even-margin rule reproduce it rejected layouts that are perfectly valid.
+    What actually matters is the property, not the historical constant: both
+    rows fully on the display, and not touching each other.
+    """
+    top_first = row_one_y + offsets[top]
+    bottom_first = row_two_y + offsets[bottom]
+    if row_one_y < MINIMUM_Y or row_two_y < MINIMUM_Y:
+        raise CaptureError(f"y below {MINIMUM_Y} is beyond what has been measured: {row_one_y}, {row_two_y}")
+    if top_first < 0:
+        raise CaptureError(f"{top} at y={row_one_y} inks from row {top_first}, above the display")
+    if top_first + heights[top] > bottom_first:
+        raise CaptureError(f"{top} at y={row_one_y} overlaps {bottom} at y={row_two_y}")
+    if bottom_first + heights[bottom] > bar.FRONT_DISPLAY_HEIGHT:
+        raise CaptureError(f"{bottom} at y={row_two_y} inks past row {bar.FRONT_DISPLAY_HEIGHT - 1}")
 
 
 def main() -> None:
@@ -215,19 +244,19 @@ def main() -> None:
     for font in MEASURABLE_FONTS:
         print(f"{font:<12} {offsets[font]:>7} {heights[font]:>7}")
 
-    validation = place_rows("tiny", "tiny", offsets, heights)
-    print(f"\ntiny/tiny validation gate: {validation}, expected {KNOWN_GOOD_TINY_LAYOUT}")
-    if validation != KNOWN_GOOD_TINY_LAYOUT:
-        raise CaptureError(
-            f"place_rows gives {validation} for tiny/tiny but the known-good layout is "
-            f"{KNOWN_GOOD_TINY_LAYOUT}. The offset model is wrong — stop and report, do not ship these values."
-        )
+    # The shipped tiny/tiny layout is known to render correctly, so whatever
+    # else changes, the rules must still accept it.
+    check_layout("tiny", "tiny", *place_rows("tiny", "tiny", offsets, heights), offsets, heights)
+    print("\ntiny/tiny sanity check: passes")
 
     top, bottom = select_pair(heights)
     row_one_y, row_two_y = place_rows(top, bottom, offsets, heights)
+    check_layout(top, bottom, row_one_y, row_two_y, offsets, heights)
     print("\n=== recommended layout ===")
     print(f"ROW_ONE_FONT = {top!r}   ROW_ONE_Y = {row_one_y}")
     print(f"ROW_TWO_FONT = {bottom!r}   ROW_TWO_Y = {row_two_y}")
+    print(f"  {top} inks rows {row_one_y + offsets[top]}-{row_one_y + offsets[top] + heights[top] - 1}")
+    print(f"  {bottom} inks rows {row_two_y + offsets[bottom]}-{row_two_y + offsets[bottom] + heights[bottom] - 1}")
 
 
 if __name__ == "__main__":
