@@ -420,17 +420,21 @@ Fill in the Results block below with the actual tool output, then commit it. Thi
 
 ```
 font          offset  height
-tiny
-small
-normal
-condensed
-bold
-large
-extra_large
+tiny               1       5
+small              2       7
+normal             2       9
+condensed          2       9
+bold               2       9
+large              2      11
+extra_large        2      10
 
-tiny/tiny sanity check:
-ROW_ONE_FONT =        ROW_ONE_Y =        inks rows
-ROW_TWO_FONT =        ROW_TWO_Y =        inks rows
+tiny/tiny sanity check: passes
+
+=== recommended layout ===
+ROW_ONE_FONT = 'normal'   ROW_ONE_Y = -2
+ROW_TWO_FONT = 'small'   ROW_TWO_Y = 7
+  normal inks rows 0-8
+  small inks rows 9-15
 ```
 
 - [ ] **Step 6: Commit the measurements**
