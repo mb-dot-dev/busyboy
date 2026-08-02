@@ -95,8 +95,9 @@ def render(target: Target, run: github.Run | None, pull_request: int | None) -> 
     Turn a fetched run into the three things the display shows.
 
     The workflow name is stripped rather than sanitized in place, and dropped
-    entirely when nothing displayable survives — the ref is always present and
-    always ASCII, so the row cannot end up empty either way. See
+    entirely when nothing displayable survives — the ref is always present, so
+    the row cannot end up empty either way. Neither part is ASCII-sanitized
+    here; `bar._row` does that over the whole composed label. See
     `bar.strip_undisplayable`.
     """
     ref = f"#{pull_request}" if pull_request is not None else target.branch

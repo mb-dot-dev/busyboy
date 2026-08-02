@@ -51,8 +51,9 @@ could empty a row whose entire content was non-ASCII, and a validation error mid
 watch. It stays as-is for row one and for the ref.
 
 The workflow name is different — it is one component of a row whose other component (the ref) is always
-present and always ASCII, so the non-empty guarantee does not depend on it. It therefore gets its own
-treatment: non-ASCII characters are **dropped**, not replaced, and the leftover whitespace is collapsed.
+present, so the non-empty guarantee does not depend on it. The entire row is ASCII-sanitized by `bar._row`
+via `_to_displayable_ascii`. It therefore gets its own treatment: non-ASCII characters are **dropped**, not
+replaced, and the leftover whitespace is collapsed.
 
 | workflow name | bottom row (PR #7) |
 |---|---|
