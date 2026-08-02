@@ -154,6 +154,16 @@ def probe_font(config: BusyboyConfig, font: str) -> tuple[int, int]:
         # ambient display instead of the probe — measuring it would report every
         # font as 16 rows tall.
         raise CaptureError(f"{font}: every row is lit — captured the bar's ambient display, not the probe")
+    # PROBE_TEXT is fixed-width; a wide-pitch font (extra_large) can run past the
+    # right edge before all twelve characters are drawn. A clipped probe still
+    # reports plausible-looking rows — it just silently drops whichever glyphs
+    # fell in the truncated tail, which can under-measure height if the deepest
+    # descender is among them. Detect the clip rather than trust the number.
+    if any(_pixel_is_lit(frame, row, bar.FRONT_DISPLAY_WIDTH - 1) for row in range(bar.FRONT_DISPLAY_HEIGHT)):
+        raise CaptureError(
+            f"{font}: probe is lit at the last column — PROBE_TEXT is clipped at the right edge, "
+            "the measured height may be truncated"
+        )
     print(f"\n--- {font} ---")
     print(render_occupancy(frame))
     return rows[0], rows[-1] - rows[0] + 1

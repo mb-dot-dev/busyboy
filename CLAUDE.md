@@ -246,8 +246,9 @@ Measured against a real bar by capturing frames from `/api/screen` and analysing
   leftover rows spread top margin, then gap, then bottom margin. Currently `ROW_ONE_FONT = "normal"` at
   `ROW_ONE_Y = -2` inks rows 0-8, and `ROW_TWO_FONT = "small"` at `ROW_TWO_Y = 7` inks rows 9-15: `normal`'s 9
   rows plus `small`'s 7 rows fill all 16 rows exactly, with no gap and no overlap. `ROW_ONE_Y` being negative is
-  legal and deliberate — it is how the top row is made to ink from display row 0. `condensed` and anything
-  taller cannot be stacked twice.
+  legal and deliberate — it is how the top row is made to ink from display row 0. Any font `condensed`'s height
+  (9 rows) or taller — `condensed`, `normal`, `bold`, `extra_large`, and `large` — cannot be stacked twice:
+  9+9=18 exceeds the 16-row display, and the others are taller still.
 - **Redrawing an element restarts its scroll animation.** Confirmed on a real bar: when a watched workflow's
   status changed and `watch.tick` issued a redraw, the scrolling repo row jumped back to its starting position
   rather than continuing from where it was. This is why `tick` compares the freshly rendered `Screen` against

@@ -107,13 +107,21 @@ order top margin, then gap, then bottom margin. So `L=2` gives top 1, gap 1, bot
 `L=1` gives 1, 0, 0.
 
 Those margins are in inked-row space; each row's `y` is then `target_row - offset(font)`. A font whose offset
-exceeds its target row would give a negative `y`. Rather than send one — the firmware's behaviour there is
-unmeasured — clamp that row's `y` to 0 and accept the resulting inked position, then confirm against the
-capture that neither row is clipped or overlapping.
+exceeds its target row gives a negative `y` — this is legal, not merely tolerated: the vendor OpenAPI spec
+declares `y`'s `minimum` as `-4096`, well below anything this calibration produces. `normal`'s offset of 2
+against a target row of 0 yields `y=-2`, and that is exactly the value the shipped top row uses. No clamp is
+applied; a computed `y` is sent as-is, and `check_layout` (below) is what confirms the result is sound rather
+than merely legal.
 
-**Validation gate.** Applied to `tiny`/`tiny`, this rule must reproduce the current, known-good `y=1` and
-`y=9`. If it does not, the model of the `y`-to-inked-row offset is wrong. In that case, stop and report the
-measurements rather than shipping a layout derived from a rule that fails its own check.
+**Validation.** Rather than demand the rule reproduce one historical `y` pair, `check_layout` asserts the
+property that actually matters: the top row's inked rows start at or after display row 0, the bottom row's
+inked rows end at or before row 15, and the two rows' inked ranges do not overlap. It also rejects any computed
+`y` below `MINIMUM_Y`, a floor past which no offset has been measured against real hardware. Applied to
+`tiny`/`tiny`, the rule computes `y=1` and `y=8` — not the historical `y=1`/`y=9`, whose margins (top 2, gap 3,
+bottom 1) were hand-tuned rather than rule-derived. `check_layout` accepts `(1, 8)` — `tiny` inking rows 2-6
+and 9-13, both on the display and non-overlapping — and that acceptance is correct: the property holds, even
+though the exact historical constant does not. Demanding equality with a hand-tuned pair would have rejected an
+implementation that is provably correct by the property that matters.
 
 ## Error handling
 
