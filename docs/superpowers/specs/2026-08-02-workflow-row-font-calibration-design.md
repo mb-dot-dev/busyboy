@@ -43,9 +43,10 @@ It may import from `busyboy` (a tool consuming the package is fine; the reverse 
 and reuses `config.load_config` for `BUSYBOY_HOST`/`BUSYBOY_TOKEN` handling plus `bar`'s public names —
 `TextElement`, `DisplayElements`, `APPLICATION_NAME`, `FONT_NAMES`, `clear`.
 
-It performs its own `requests` calls rather than reaching for `bar._request`. It needs `GET /api/screen`, an
-endpoint `bar.py` has no reason to know about, so it owns HTTP in both directions instead of half-borrowing a
-private helper. `bar.py`'s transport is not modified.
+Drawing and clearing go through `bar`'s public `draw_text` and `clear`, which already do exactly the right
+thing. Capture does not: `GET /api/screen` is an endpoint `bar.py` has no reason to know about, and busyboy
+never renders a frame it has read back. So the tool owns that one request with its own `requests` call rather
+than reaching for `bar._request`. `bar.py`'s transport is not modified.
 
 ### `src/busyboy/bar.py` (modified)
 
