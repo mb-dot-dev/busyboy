@@ -230,6 +230,6 @@ def workflow(
     target = watch.Target(
         repo=repo,
         branch=branch or git.current_branch(),
-        workflow_id=github.resolve_workflow(github_token, repo, workflow_reference).id,
+        workflow=github.resolve_workflow(github_token, repo, workflow_reference),
     )
     watch.watch(config, github_token, target, interval=interval)

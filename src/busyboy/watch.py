@@ -38,11 +38,17 @@ FALLBACK_ICON: bar.IconName = "pending"
 
 @dataclasses.dataclass(frozen=True)
 class Target:
-    """What is being watched. Resolved once at startup; none of it changes mid-watch."""
+    """
+    What is being watched. Resolved once at startup; none of it changes mid-watch.
+
+    The whole `github.Workflow` is held rather than just its id, so the id used
+    to fetch runs and the name shown on the display can only ever come from the
+    same `resolve_workflow` call and cannot drift apart.
+    """
 
     repo: github.Repo
     branch: str
-    workflow_id: int
+    workflow: github.Workflow
 
 
 @dataclasses.dataclass(frozen=True)
@@ -111,7 +117,7 @@ def tick(
     result; every other path leaves it None, meaning "use the normal interval".
     """
     try:
-        run = github.latest_run(token, target.repo, target.workflow_id, target.branch)
+        run = github.latest_run(token, target.repo, target.workflow.id, target.branch)
         pull_request = github.pull_request_number(token, target.repo, target.branch)
     except exceptions.GitHubTransientError as error:
         LOGGER.debug("GitHub request failed, keeping the display as it is: %s", error)

@@ -10,7 +10,8 @@ from busyboy import bar, exceptions, github, watch
 from busyboy.config import load_config
 
 REPO = github.Repo(owner="mb-dot-dev", name="busyboy")
-TARGET = watch.Target(repo=REPO, branch="feature/x", workflow_id=42)
+WORKFLOW = github.Workflow(id=42, name="CI", path=".github/workflows/main.yaml")
+TARGET = watch.Target(repo=REPO, branch="feature/x", workflow=WORKFLOW)
 TOKEN = "gho_test"
 
 RUNS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/actions/workflows/42/runs"
@@ -192,7 +193,7 @@ def test_a_rejected_github_token_is_not_swallowed(config):
 
 @responses.activate
 def test_a_non_ascii_branch_name_completes_and_draws_instead_of_raising(config):
-    unicode_target = watch.Target(repo=REPO, branch="feature/café", workflow_id=42)
+    unicode_target = watch.Target(repo=REPO, branch="feature/café", workflow=WORKFLOW)
     responses.add(
         responses.GET,
         RUNS_URL,
