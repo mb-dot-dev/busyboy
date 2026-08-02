@@ -231,6 +231,12 @@ def probe_font(config: BusyboyConfig, font: str) -> tuple[int, int]:
     rows = occupied_rows(frame)
     if not rows:
         raise CaptureError(f"{font}: captured an all-black frame — the draw did not land, or 0.5s was too short")
+    if len(rows) == bar.FRONT_DISPLAY_HEIGHT:
+        # An idle bar runs a full-screen animated app. Drawing a busyboy element
+        # normally blanks it, so every row being lit means the capture caught the
+        # ambient display instead of the probe — measuring it would report every
+        # font as 16 rows tall.
+        raise CaptureError(f"{font}: every row is lit — captured the bar's ambient display, not the probe")
     print(f"\n--- {font} ---")
     print(render_occupancy(frame))
     return rows[0], rows[-1] - rows[0] + 1
@@ -339,21 +345,25 @@ git commit -m "Add a frame-capture tool for measuring front display font geometr
 
 This task requires a real BUSY Bar on the network. It cannot be completed from tests.
 
-- [ ] **Step 1: Point the environment at the real bar**
+- [ ] **Step 1: Confirm the bar is reachable**
+
+The bar is connected over USB, so the default host (`10.0.4.20`) works with no token and no environment
+setup. Verified during pre-flight: both `POST /api/display/draw` and `GET /api/screen` succeed unauthenticated
+over USB.
 
 ```bash
-source ~/.zshrc && busybarenv
+uv run --frozen busyboy text "calibrating" --timeout 5
 ```
 
-Confirm it took without revealing the token: `echo "${BUSYBOY_HOST:?not set}" && [ -n "$BUSYBOY_TOKEN" ] && echo "token set"`
+Expected: exit 0, silent, and the word appears on the bar. If this fails, stop — every later step depends on
+it. Do not set `BUSYBOY_HOST`/`BUSYBOY_TOKEN`; the WiFi host is a different, token-protected path and is not
+needed here.
 
-- [ ] **Step 2: Confirm the bar is reachable**
+- [ ] **Step 2: Note on ambient content**
 
-```bash
-uv run --frozen busyboy text "calibrating"
-```
-
-Expected: exit 0, silent, and the word appears on the bar. If this fails, stop — every later step depends on it.
+An idle bar runs a full-screen animated app, so a capture taken when busyboy has nothing drawn shows all 16
+rows lit. This is expected and harmless: drawing a busyboy element blanks the display, and every probe
+captures immediately after its own draw. `probe_font` raises if it ever sees all 16 rows lit.
 
 - [ ] **Step 3: Run the calibration**
 
@@ -536,7 +546,7 @@ Expected: lint clean, all tests pass. `ROW_FONT` is now gone — if anything sti
 
 - [ ] **Step 9: Verify on the real bar**
 
-With the environment still pointed at the bar (`source ~/.zshrc && busybarenv`), run the watch against this repo for a few seconds and look at the display:
+The bar is on USB, so no environment setup is needed. Run the watch against this repo for a few seconds and look at the display:
 
 ```bash
 uv run --frozen busyboy gh workflow main.yaml
