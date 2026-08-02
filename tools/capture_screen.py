@@ -25,8 +25,13 @@ from busyboy import bar
 from busyboy.config import BusyboyConfig, load_config
 
 # Caps, descenders, digits, a pipe and an underscore, so the measured range is
-# the font's full glyph box rather than one letter's extent.
-PROBE_TEXT = "AXgjpqy019|_"
+# the font's full glyph box rather than one letter's extent. Drawn in short
+# chunks rather than as one 12-character string: at 72px wide, the wider fonts
+# (bold, large, extra_large) clip before the last character lands. Glyph
+# height does not depend on what else shares the line, so the union of
+# occupied rows across a partition of these characters equals what the whole
+# string would measure if it fit — without ever clipping.
+PROBE_CHUNKS = ("AXg", "jpq", "y01", "9|_")
 PROBE_ELEMENT_ID = "probe"
 SETTLE_SECONDS = 0.5
 SCREEN_PATH = "/api/screen"
@@ -125,48 +130,64 @@ def render_occupancy(frame: bytes) -> str:
 
 def probe_font(config: BusyboyConfig, font: str) -> tuple[int, int]:
     """
-    Draw one font at y=0 and measure the rows its glyphs occupy.
+    Draw one font at y=0, chunk by chunk, and measure the rows its glyphs occupy.
 
     Returns (offset, height): the first inked row, and the count of rows
     spanned. y is not the first inked row — condensed sits 2 rows below the y
     it is given — so both numbers are needed to place a row deliberately.
+
+    Each chunk of PROBE_CHUNKS is drawn, captured, and cleared in turn, and the
+    occupied rows are unioned across all chunks before offset and height are
+    derived — see the comment on PROBE_CHUNKS for why chunking is necessary
+    and why it doesn't change the result.
     """
-    bar.clear(config)
-    element = bar.TextElement(
-        id=PROBE_ELEMENT_ID,
-        text=PROBE_TEXT,
-        font=cast(bar.DisplayFontName, font),
-        display="front",
-        x=0,
-        y=0,
-        width=bar.FRONT_DISPLAY_WIDTH,
-        scroll_rate=0,
-    )
-    bar.draw_text(config, bar.DisplayElements(application_name=bar.APPLICATION_NAME, elements=[element]))
-    time.sleep(SETTLE_SECONDS)
-    frame = capture_front_frame(config)
-    rows = occupied_rows(frame)
-    if not rows:
-        raise CaptureError(f"{font}: captured an all-black frame — the draw did not land, or 0.5s was too short")
-    if len(rows) == bar.FRONT_DISPLAY_HEIGHT:
-        # An idle bar runs a full-screen animated app. Drawing a busyboy element
-        # normally blanks it, so every row being lit means the capture caught the
-        # ambient display instead of the probe — measuring it would report every
-        # font as 16 rows tall.
-        raise CaptureError(f"{font}: every row is lit — captured the bar's ambient display, not the probe")
-    # PROBE_TEXT is fixed-width; a wide-pitch font (extra_large) can run past the
-    # right edge before all twelve characters are drawn. A clipped probe still
-    # reports plausible-looking rows — it just silently drops whichever glyphs
-    # fell in the truncated tail, which can under-measure height if the deepest
-    # descender is among them. Detect the clip rather than trust the number.
-    if any(_pixel_is_lit(frame, row, bar.FRONT_DISPLAY_WIDTH - 1) for row in range(bar.FRONT_DISPLAY_HEIGHT)):
-        raise CaptureError(
-            f"{font}: probe is lit at the last column — PROBE_TEXT is clipped at the right edge, "
-            "the measured height may be truncated"
+    all_rows: set[int] = set()
+    last_frame: bytes | None = None
+    for chunk in PROBE_CHUNKS:
+        bar.clear(config)
+        element = bar.TextElement(
+            id=PROBE_ELEMENT_ID,
+            text=chunk,
+            font=cast(bar.DisplayFontName, font),
+            display="front",
+            x=0,
+            y=0,
+            width=bar.FRONT_DISPLAY_WIDTH,
+            scroll_rate=0,
         )
-    print(f"\n--- {font} ---")
-    print(render_occupancy(frame))
-    return rows[0], rows[-1] - rows[0] + 1
+        bar.draw_text(config, bar.DisplayElements(application_name=bar.APPLICATION_NAME, elements=[element]))
+        time.sleep(SETTLE_SECONDS)
+        frame = capture_front_frame(config)
+        rows = occupied_rows(frame)
+        if not rows:
+            raise CaptureError(
+                f"{font}: captured an all-black frame for chunk {chunk!r} — the draw did not land, "
+                "or 0.5s was too short"
+            )
+        if len(rows) == bar.FRONT_DISPLAY_HEIGHT:
+            # An idle bar runs a full-screen animated app. Drawing a busyboy element
+            # normally blanks it, so every row being lit means the capture caught the
+            # ambient display instead of the probe — measuring it would report every
+            # font as 16 rows tall.
+            raise CaptureError(
+                f"{font}: every row is lit for chunk {chunk!r} — captured the bar's ambient display, not the probe"
+            )
+        # Each chunk is short enough to fit any measurable font's width, so this
+        # should never fire — but keep it as the check that catches a future font
+        # wide enough to overflow even a 3-character chunk.
+        if any(_pixel_is_lit(frame, row, bar.FRONT_DISPLAY_WIDTH - 1) for row in range(bar.FRONT_DISPLAY_HEIGHT)):
+            raise CaptureError(
+                f"{font}: probe is lit at the last column for chunk {chunk!r} — it is clipped at the right edge, "
+                "the measured height may be truncated"
+            )
+        all_rows.update(rows)
+        last_frame = frame
+
+    assert last_frame is not None  # PROBE_CHUNKS is non-empty, so the loop always runs at least once.
+    print(f"\n--- {font} (last chunk {PROBE_CHUNKS[-1]!r} shown; offset/height are unioned across all chunks) ---")
+    print(render_occupancy(last_frame))
+    rows_sorted = sorted(all_rows)
+    return rows_sorted[0], rows_sorted[-1] - rows_sorted[0] + 1
 
 
 def select_pair(heights: dict[str, int]) -> tuple[str, str]:
