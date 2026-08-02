@@ -231,7 +231,8 @@ def strip_undisplayable(text: str) -> str:
 
 def build_workflow_payload(*, repo_label: str, ref_label: str, icon: IconName) -> DisplayElements:
     """
-    Build the two-row workflow layout: repository, pull request or branch, and a status icon.
+    Build the two-row workflow layout: repository on top; pull request or branch and the workflow name below;
+    a status icon to their left.
 
     Element ids are stable, so redrawing replaces the previous elements rather
     than stacking new ones on top of them. Labels are sanitized to printable

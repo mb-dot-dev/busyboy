@@ -72,13 +72,13 @@ def test_no_run_at_all_shows_pending():
 def test_an_open_pull_request_is_shown_as_its_number():
     screen = watch.render(TARGET, run("completed", "success"), 12)
 
-    assert screen == watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    assert screen == watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
 
 
 def test_without_a_pull_request_the_branch_name_is_shown():
     screen = watch.render(TARGET, run("in_progress"), None)
 
-    assert screen.ref_label == "feature/x"
+    assert screen.ref_label == "feature/x CI"
 
 
 @responses.activate
@@ -93,7 +93,7 @@ def test_a_tick_draws_the_current_state(config):
 
     result = watch.tick(config, TOKEN, TARGET, None)
 
-    assert result.screen == watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    assert result.screen == watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
     assert result.retry_after is None
     assert len(responses.calls) == 3
 
@@ -108,7 +108,7 @@ def test_an_unchanged_state_is_not_redrawn(config):
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
     responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
 
-    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
     result = watch.tick(config, TOKEN, TARGET, previous)
 
     assert result.screen == previous
@@ -125,7 +125,7 @@ def test_a_changed_state_is_redrawn(config):
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
     responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
 
-    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
     result = watch.tick(config, TOKEN, TARGET, previous)
 
     assert result.screen is not None
@@ -137,7 +137,7 @@ def test_a_changed_state_is_redrawn(config):
 def test_a_transient_github_failure_keeps_the_previous_state(config):
     responses.add(responses.GET, RUNS_URL, json={"message": "oops"}, status=502)
 
-    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
 
     assert watch.tick(config, TOKEN, TARGET, previous).screen == previous
 
@@ -146,7 +146,7 @@ def test_a_transient_github_failure_keeps_the_previous_state(config):
 def test_a_dropped_github_connection_keeps_the_previous_state(config):
     responses.add(responses.GET, RUNS_URL, body=requests.exceptions.ConnectionError("boom"))
 
-    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
 
     assert watch.tick(config, TOKEN, TARGET, previous).screen == previous
 
@@ -161,7 +161,7 @@ def test_a_rate_limited_response_carries_retry_after_into_the_result(config):
         headers={"Retry-After": "60"},
     )
 
-    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
     result = watch.tick(config, TOKEN, TARGET, previous)
 
     assert result.screen == previous
@@ -220,7 +220,7 @@ def test_an_unreachable_bar_keeps_the_previous_state(config, monkeypatch):
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
     responses.add(responses.POST, DRAW_URL, body=requests.exceptions.ConnectionError("boom"))
 
-    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12", icon="success")
+    previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
 
     assert watch.tick(config, TOKEN, TARGET, previous).screen == previous
 
@@ -380,3 +380,28 @@ def test_a_failed_icon_upload_stops_before_the_loop(config):
         watch.watch(config, TOKEN, TARGET, interval=10, sleep=lambda seconds: None)
 
     assert not [call for call in responses.calls if "actions/workflows" in (call.request.url or "")]
+
+
+def test_an_emoji_in_the_workflow_name_is_dropped_rather_than_replaced():
+    target = watch.Target(
+        repo=REPO,
+        branch="main",
+        workflow=github.Workflow(id=42, name="🚀 Deploy", path=".github/workflows/deploy.yaml"),
+    )
+
+    screen = watch.render(target, run("completed", "success"), 7)
+
+    assert screen.ref_label == "#7 Deploy"
+
+
+def test_a_workflow_name_with_nothing_displayable_is_omitted_entirely():
+    """The row falls back to exactly the ref, with no orphaned separator."""
+    target = watch.Target(
+        repo=REPO,
+        branch="main",
+        workflow=github.Workflow(id=42, name="🚀", path=".github/workflows/deploy.yaml"),
+    )
+
+    screen = watch.render(target, run("completed", "success"), 7)
+
+    assert screen.ref_label == "#7"

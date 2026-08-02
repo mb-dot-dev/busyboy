@@ -91,10 +91,19 @@ def icon_for(run: github.Run | None) -> bar.IconName:
 
 
 def render(target: Target, run: github.Run | None, pull_request: int | None) -> Screen:
-    """Turn a fetched run into the three things the display shows."""
+    """
+    Turn a fetched run into the three things the display shows.
+
+    The workflow name is stripped rather than sanitized in place, and dropped
+    entirely when nothing displayable survives — the ref is always present and
+    always ASCII, so the row cannot end up empty either way. See
+    `bar.strip_undisplayable`.
+    """
+    ref = f"#{pull_request}" if pull_request is not None else target.branch
+    name = bar.strip_undisplayable(target.workflow.name)
     return Screen(
         repo_label=target.repo.slug,
-        ref_label=f"#{pull_request}" if pull_request is not None else target.branch,
+        ref_label=f"{ref} {name}" if name else ref,
         icon=icon_for(run),
     )
 
