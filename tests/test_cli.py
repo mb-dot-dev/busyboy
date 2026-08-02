@@ -208,7 +208,7 @@ def test_watching_a_workflow_draws_and_exits_cleanly(github_bar, monkeypatch):
     body = json.loads(draws[0].request.body)
     elements = {element["id"]: element for element in body["elements"]}
     assert elements["repo"]["text"] == "mb-dot-dev/busyboy"
-    assert elements["ref"]["text"] == "#12"
+    assert elements["ref"]["text"] == "#12 CI"
     assert elements["icon"]["path"] == "success.png"
 
 

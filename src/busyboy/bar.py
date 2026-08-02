@@ -213,9 +213,26 @@ def _to_displayable_ascii(text: str) -> str:
     return "".join(character if "\x20" <= character <= "\x7e" else "?" for character in text)
 
 
+def strip_undisplayable(text: str) -> str:
+    """
+    Drop every character the display's bitmap fonts cannot render, collapsing the leftover whitespace.
+
+    Unlike `_to_displayable_ascii`, this may return "". It is for text that is
+    one *component* of a row rather than a whole row — text where some other
+    component already guarantees `TextElement.text`'s `min_length=1`, so
+    dropping characters cannot produce an invalid payload. That is what buys
+    the nicer rendering: a workflow named "🚀 Deploy" reads as "Deploy" here,
+    where one-for-one replacement would leave a stray "?" in front of it.
+    Callers must handle the empty result.
+    """
+    displayable = "".join(character for character in text if "\x20" <= character <= "\x7e")
+    return " ".join(displayable.split())
+
+
 def build_workflow_payload(*, repo_label: str, ref_label: str, icon: IconName) -> DisplayElements:
     """
-    Build the two-row workflow layout: repository, pull request or branch, and a status icon.
+    Build the two-row workflow layout: repository on top; pull request or branch and the workflow name below;
+    a status icon to their left.
 
     Element ids are stable, so redrawing replaces the previous elements rather
     than stacking new ones on top of them. Labels are sanitized to printable

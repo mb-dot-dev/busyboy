@@ -38,11 +38,17 @@ FALLBACK_ICON: bar.IconName = "pending"
 
 @dataclasses.dataclass(frozen=True)
 class Target:
-    """What is being watched. Resolved once at startup; none of it changes mid-watch."""
+    """
+    What is being watched. Resolved once at startup; none of it changes mid-watch.
+
+    The whole `github.Workflow` is held rather than just its id, so the id used
+    to fetch runs and the name shown on the display can only ever come from the
+    same `resolve_workflow` call and cannot drift apart.
+    """
 
     repo: github.Repo
     branch: str
-    workflow_id: int
+    workflow: github.Workflow
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,10 +91,20 @@ def icon_for(run: github.Run | None) -> bar.IconName:
 
 
 def render(target: Target, run: github.Run | None, pull_request: int | None) -> Screen:
-    """Turn a fetched run into the three things the display shows."""
+    """
+    Turn a fetched run into the three things the display shows.
+
+    The workflow name is stripped rather than sanitized in place, and dropped
+    entirely when nothing displayable survives — the ref is always present, so
+    the row cannot end up empty either way. Neither part is ASCII-sanitized
+    here; `bar._row` does that over the whole composed label. See
+    `bar.strip_undisplayable`.
+    """
+    ref = f"#{pull_request}" if pull_request is not None else target.branch
+    name = bar.strip_undisplayable(target.workflow.name)
     return Screen(
         repo_label=target.repo.slug,
-        ref_label=f"#{pull_request}" if pull_request is not None else target.branch,
+        ref_label=f"{ref} {name}" if name else ref,
         icon=icon_for(run),
     )
 
@@ -111,7 +127,7 @@ def tick(
     result; every other path leaves it None, meaning "use the normal interval".
     """
     try:
-        run = github.latest_run(token, target.repo, target.workflow_id, target.branch)
+        run = github.latest_run(token, target.repo, target.workflow.id, target.branch)
         pull_request = github.pull_request_number(token, target.repo, target.branch)
     except exceptions.GitHubTransientError as error:
         LOGGER.debug("GitHub request failed, keeping the display as it is: %s", error)

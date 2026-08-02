@@ -62,7 +62,9 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
 - `src/busyboy/watch.py` — the poll loop: `tick` (one fetch-render-diff-draw cycle) and `watch` (the `while
   True`, Ctrl+C, and cleanup around it). The only module that imports both `bar` and `github`, because turning a
   GitHub run into bar pixels is its entire job. Knows nothing about Click or argv — `cli.py` builds its
-  `Target` and passes it in.
+  `Target` and passes it in. `render` composes the bottom row as the ref (`#123` for an open pull request,
+  otherwise the branch) followed by the workflow's display name, so two workflows in the same repository on
+  the same branch are distinguishable on the bar.
 - `src/busyboy/exceptions.py` — the exception hierarchy (see below) and `format_delivery_error(error) -> str`,
   the one-line renderer `cli.py` prints to stderr.
 - `src/busyboy/cli.py` — the `main` Click group; the `text` and `clear` subcommands; the `gh` subgroup and its
@@ -183,7 +185,14 @@ at a keyboard a moment ago, so rejecting it with a validation error is useful, a
 row's text is a repository or branch name fetched from GitHub in the middle of the poll loop — GitHub permits
 Unicode in both, and there is no user present at that moment to see or act on a rejection — so raising would
 just kill the watch on a value nobody typed. Sanitizing one-for-one instead keeps the loop alive and the
-display legible.
+display legible. `bar.strip_undisplayable` is a third point on that same spectrum, and the three are not
+redundant. Reject outright (`build_text_payload`) for text a human typed a moment ago and can retype.
+Replace one-for-one (`_to_displayable_ascii`) for a whole row, where dropping characters could empty it
+and trip `TextElement.text`'s `min_length=1` mid-poll-loop, killing the watch over a value nobody typed.
+Drop and collapse (`strip_undisplayable`) for one *component* of a row — the workflow name — where the
+ref beside it already guarantees the row is non-empty, so a name like "🚀 Deploy" can read as "Deploy"
+instead of "? Deploy". Collapsing the two private-looking helpers into one would either put stray `?`s
+back in front of emoji-prefixed workflow names or reintroduce the empty-row crash. Keep all three.
 
 ## Testing
 

@@ -338,3 +338,18 @@ def test_a_failed_icon_upload_raises(config):
 
     with pytest.raises(exceptions.BarError):
         bar.upload_icons(config)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("CI", "CI"),
+        ("🚀 Deploy", "Deploy"),
+        ("CI 🚀 Build", "CI Build"),
+        ("🚀", ""),
+        ("", ""),
+        ("  Release  ", "Release"),
+    ],
+)
+def test_undisplayable_characters_are_dropped_rather_than_replaced(text, expected):
+    assert bar.strip_undisplayable(text) == expected
