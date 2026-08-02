@@ -17,7 +17,7 @@ request itself rather than reaching into bar's private transport.
 
 import base64
 import time
-from typing import cast
+from typing import cast, get_args
 
 import requests
 
@@ -40,9 +40,14 @@ BYTES_PER_PIXEL = 3
 FRAME_SIZE = bar.FRONT_DISPLAY_WIDTH * bar.FRONT_DISPLAY_HEIGHT * BYTES_PER_PIXEL
 REQUEST_TIMEOUT = (5, 10)
 
-# "global" selects whatever font the device is configured for rather than
-# naming a size, so it has no fixed height to measure or to stack.
-MEASURABLE_FONTS: tuple[str, ...] = tuple(name for name in bar.FONT_NAMES if name != "global")
+# bar.MeasuredFontName is every font except "global", which selects whatever font the device is configured
+# for rather than naming a size, so it has no fixed height to measure or to stack. Deriving the list from
+# that type rather than filtering bar.FONT_NAMES here keeps one definition of "measurable" — this tool
+# produces the tables bar.py is keyed by, so the two drifting apart is exactly the bug to design out.
+# get_args() is untyped (tuple[Any, ...]), so one cast is unavoidable.
+MEASURABLE_FONTS: tuple[bar.MeasuredFontName, ...] = cast(
+    tuple[bar.MeasuredFontName, ...], get_args(bar.MeasuredFontName)
+)
 
 # Measured on real hardware: normal at y=-2 inks rows 0-8, exactly as its
 # offset of 2 predicts. Negative y is legal, and necessary — every font except
@@ -128,7 +133,7 @@ def render_occupancy(frame: bytes) -> str:
     return "\n".join(lines)
 
 
-def probe_font(config: BusyboyConfig, font: str) -> tuple[int, int]:
+def probe_font(config: BusyboyConfig, font: bar.MeasuredFontName) -> tuple[int, int]:
     """
     Draw one font at y=0, chunk by chunk, and measure the rows its glyphs occupy.
 
@@ -148,7 +153,7 @@ def probe_font(config: BusyboyConfig, font: str) -> tuple[int, int]:
         element = bar.TextElement(
             id=PROBE_ELEMENT_ID,
             text=chunk,
-            font=cast(bar.DisplayFontName, font),
+            font=font,
             display="front",
             x=0,
             y=0,
@@ -190,7 +195,7 @@ def probe_font(config: BusyboyConfig, font: str) -> tuple[int, int]:
     return rows_sorted[0], rows_sorted[-1] - rows_sorted[0] + 1
 
 
-def select_pair(heights: dict[str, int]) -> tuple[str, str]:
+def select_pair(heights: dict[bar.MeasuredFontName, int]) -> tuple[bar.MeasuredFontName, bar.MeasuredFontName]:
     """
     Choose the fonts for the two workflow rows.
 
@@ -212,7 +217,12 @@ def select_pair(heights: dict[str, int]) -> tuple[str, str]:
     return max(pairs, key=lambda pair: (heights[pair[0]] + heights[pair[1]], heights[pair[0]]))
 
 
-def place_rows(top: str, bottom: str, offsets: dict[str, int], heights: dict[str, int]) -> tuple[int, int]:
+def place_rows(
+    top: bar.MeasuredFontName,
+    bottom: bar.MeasuredFontName,
+    offsets: dict[bar.MeasuredFontName, int],
+    heights: dict[bar.MeasuredFontName, int],
+) -> tuple[int, int]:
     """
     Compute both rows' y values from the measured geometry.
 
@@ -232,12 +242,12 @@ def place_rows(top: str, bottom: str, offsets: dict[str, int], heights: dict[str
 
 
 def check_layout(
-    top: str,
-    bottom: str,
+    top: bar.MeasuredFontName,
+    bottom: bar.MeasuredFontName,
     row_one_y: int,
     row_two_y: int,
-    offsets: dict[str, int],
-    heights: dict[str, int],
+    offsets: dict[bar.MeasuredFontName, int],
+    heights: dict[bar.MeasuredFontName, int],
 ) -> None:
     """
     Verify a computed layout neither clips nor overlaps.
@@ -264,8 +274,8 @@ def check_layout(
 def main() -> None:
     """Probe every measurable font, then report the table and the layout it implies."""
     config = load_config()
-    offsets: dict[str, int] = {}
-    heights: dict[str, int] = {}
+    offsets: dict[bar.MeasuredFontName, int] = {}
+    heights: dict[bar.MeasuredFontName, int] = {}
     for font in MEASURABLE_FONTS:
         offsets[font], heights[font] = probe_font(config, font)
     bar.clear(config)

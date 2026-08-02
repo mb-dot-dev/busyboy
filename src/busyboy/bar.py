@@ -20,6 +20,11 @@ FRONT_DISPLAY_WIDTH = 72
 FRONT_DISPLAY_HEIGHT = 16
 
 DisplayFontName = Literal["tiny", "small", "normal", "condensed", "bold", "large", "extra_large", "global"]
+# Every font except "global", which selects whatever font the device is configured for rather than naming a
+# size. It therefore has no fixed glyph geometry, which is why FONT_GLYPH_OFFSETS and FONT_GLYPH_HEIGHTS are
+# keyed by this narrower type: annotating them with DisplayFontName would promise a "global" entry that
+# cannot exist, turning a lookup that type-checks into a KeyError at runtime.
+MeasuredFontName = Literal["tiny", "small", "normal", "condensed", "bold", "large", "extra_large"]
 DEFAULT_FONT: DisplayFontName = "condensed"
 FONT_NAMES: tuple[str, ...] = get_args(DisplayFontName)
 
@@ -49,9 +54,9 @@ ASSETS_PACKAGE = "busyboy.assets"
 # Measured against a real bar with tools/capture_screen.py. A font's `y` is not
 # its first inked row — each font sits `offset` rows below the y it is given —
 # so placing a row deliberately needs both numbers. Heights are the inked rows
-# a glyph box spans. "global" is absent: it selects the device's configured
-# font rather than naming a size, so it has no fixed geometry.
-FONT_GLYPH_OFFSETS: dict[DisplayFontName, int] = {
+# a glyph box spans. Keyed by MeasuredFontName, so "global" is absent by
+# construction rather than by convention.
+FONT_GLYPH_OFFSETS: dict[MeasuredFontName, int] = {
     "tiny": 1,
     "small": 2,
     "normal": 2,
@@ -60,7 +65,7 @@ FONT_GLYPH_OFFSETS: dict[DisplayFontName, int] = {
     "large": 2,
     "extra_large": 2,
 }
-FONT_GLYPH_HEIGHTS: dict[DisplayFontName, int] = {
+FONT_GLYPH_HEIGHTS: dict[MeasuredFontName, int] = {
     "tiny": 5,
     "small": 7,
     "normal": 9,
@@ -75,8 +80,8 @@ ICON_X = 2
 ICON_Y = 2
 TEXT_X = 18
 TEXT_WIDTH = FRONT_DISPLAY_WIDTH - TEXT_X
-ROW_ONE_FONT: DisplayFontName = "normal"
-ROW_TWO_FONT: DisplayFontName = "small"
+ROW_ONE_FONT: MeasuredFontName = "normal"
+ROW_TWO_FONT: MeasuredFontName = "small"
 ROW_ONE_Y = -2
 ROW_TWO_Y = 7
 
