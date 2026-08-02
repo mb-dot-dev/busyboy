@@ -17,8 +17,14 @@ TEXT_ELEMENT_ID = "text"
 # The front display is a 72x16 RGB LED matrix; spanning its full width gives
 # scrolling text the whole panel to move across.
 FRONT_DISPLAY_WIDTH = 72
+FRONT_DISPLAY_HEIGHT = 16
 
 DisplayFontName = Literal["tiny", "small", "normal", "condensed", "bold", "large", "extra_large", "global"]
+# Every font except "global", which selects whatever font the device is configured for rather than naming a
+# size. It therefore has no fixed glyph geometry, which is why FONT_GLYPH_OFFSETS and FONT_GLYPH_HEIGHTS are
+# keyed by this narrower type: annotating them with DisplayFontName would promise a "global" entry that
+# cannot exist, turning a lookup that type-checks into a KeyError at runtime.
+MeasuredFontName = Literal["tiny", "small", "normal", "condensed", "bold", "large", "extra_large"]
 DEFAULT_FONT: DisplayFontName = "condensed"
 FONT_NAMES: tuple[str, ...] = get_args(DisplayFontName)
 
@@ -45,17 +51,39 @@ ASSETS_PACKAGE = "busyboy.assets"
 # Two-row workflow layout on the 72x16 front display: a 12x12 icon on the
 # left, and a text column beside it carrying both rows.
 #
-# Measured against a real bar: the "tiny" font stacks twice within the 16-row
-# display at y=1 and y=9, with both rows fully visible and neither clipped nor
-# overlapping. See the hardware-facts section of CLAUDE.md.
+# Measured against a real bar with tools/capture_screen.py. A font's `y` is not
+# its first inked row — each font sits `offset` rows below the y it is given —
+# so placing a row deliberately needs both numbers. Heights are the inked rows
+# a glyph box spans. Keyed by MeasuredFontName, so "global" is absent by
+# construction rather than by convention.
+FONT_GLYPH_OFFSETS: dict[MeasuredFontName, int] = {
+    "tiny": 1,
+    "small": 2,
+    "normal": 2,
+    "condensed": 2,
+    "bold": 2,
+    "large": 2,
+    "extra_large": 2,
+}
+FONT_GLYPH_HEIGHTS: dict[MeasuredFontName, int] = {
+    "tiny": 5,
+    "small": 7,
+    "normal": 9,
+    "condensed": 9,
+    "bold": 9,
+    "large": 11,
+    "extra_large": 10,
+}
+
 ICON_SIZE = 12
 ICON_X = 2
 ICON_Y = 2
 TEXT_X = 18
 TEXT_WIDTH = FRONT_DISPLAY_WIDTH - TEXT_X
-ROW_ONE_Y = 1
-ROW_TWO_Y = 9
-ROW_FONT: DisplayFontName = "tiny"
+ROW_ONE_FONT: MeasuredFontName = "normal"
+ROW_TWO_FONT: MeasuredFontName = "small"
+ROW_ONE_Y = -2
+ROW_TWO_Y = 7
 
 REPO_ELEMENT_ID = "repo"
 REF_ELEMENT_ID = "ref"
@@ -153,12 +181,12 @@ def build_text_payload(
     return DisplayElements(application_name=APPLICATION_NAME, elements=[element])
 
 
-def _row(element_id: str, text: str, y: int) -> TextElement:
+def _row(element_id: str, text: str, y: int, font: DisplayFontName) -> TextElement:
     """Build one row of the workflow layout, scrolling when it overflows the column."""
     return TextElement(
         id=element_id,
         text=_to_displayable_ascii(text),
-        font=ROW_FONT,
+        font=font,
         display="front",
         x=TEXT_X,
         y=y,
@@ -197,8 +225,8 @@ def build_workflow_payload(*, repo_label: str, ref_label: str, icon: IconName) -
         application_name=APPLICATION_NAME,
         elements=[
             ImageElement(id=ICON_ELEMENT_ID, path=f"{icon}.png", display="front", x=ICON_X, y=ICON_Y),
-            _row(REPO_ELEMENT_ID, repo_label, ROW_ONE_Y),
-            _row(REF_ELEMENT_ID, ref_label, ROW_TWO_Y),
+            _row(REPO_ELEMENT_ID, repo_label, ROW_ONE_Y, ROW_ONE_FONT),
+            _row(REF_ELEMENT_ID, ref_label, ROW_TWO_Y, ROW_TWO_FONT),
         ],
     )
 

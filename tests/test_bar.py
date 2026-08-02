@@ -246,7 +246,8 @@ def test_the_two_rows_share_a_text_column_beside_the_icon():
         assert row["x"] == bar.TEXT_X
         assert row["width"] == bar.TEXT_WIDTH
         assert row["display"] == "front"
-        assert row["font"] == bar.ROW_FONT
+    assert elements["repo"]["font"] == bar.ROW_ONE_FONT
+    assert elements["ref"]["font"] == bar.ROW_TWO_FONT
     assert elements["repo"]["y"] == bar.ROW_ONE_Y
     assert elements["ref"]["y"] == bar.ROW_TWO_Y
     assert elements["icon"]["x"] == bar.ICON_X
@@ -256,6 +257,20 @@ def test_the_two_rows_share_a_text_column_beside_the_icon():
 def test_the_icon_and_text_column_fit_the_front_display():
     assert bar.ICON_X + bar.ICON_SIZE <= bar.TEXT_X
     assert bar.TEXT_X + bar.TEXT_WIDTH == bar.FRONT_DISPLAY_WIDTH
+
+
+def test_the_two_rows_fit_the_front_display_without_overlapping():
+    top_row = bar.ROW_ONE_Y + bar.FONT_GLYPH_OFFSETS[bar.ROW_ONE_FONT]
+    bottom_row = bar.ROW_TWO_Y + bar.FONT_GLYPH_OFFSETS[bar.ROW_TWO_FONT]
+
+    assert top_row >= 0
+    assert top_row + bar.FONT_GLYPH_HEIGHTS[bar.ROW_ONE_FONT] <= bottom_row
+    assert bottom_row + bar.FONT_GLYPH_HEIGHTS[bar.ROW_TWO_FONT] <= bar.FRONT_DISPLAY_HEIGHT
+
+
+def test_the_front_display_is_seventy_two_by_sixteen():
+    assert bar.FRONT_DISPLAY_WIDTH == 72
+    assert bar.FRONT_DISPLAY_HEIGHT == 16
 
 
 def test_workflow_element_ids_are_stable_so_a_redraw_replaces():
