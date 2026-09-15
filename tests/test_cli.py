@@ -2,7 +2,6 @@
 
 from importlib import metadata
 import json
-import re
 
 import pytest
 import responses
@@ -12,7 +11,8 @@ from busyboy import cli, exceptions, github
 
 ENV = {"BUSYBOY_HOST": "10.0.4.20", "BUSYBOY_TOKEN": "testtoken"}
 
-DRAW_URL_PATTERN = re.compile(r"^http://[^/]+/api/display/draw")
+DRAW_PATH = "/api/display/draw"
+UPLOAD_PATH = "/api/assets/upload"
 
 
 @pytest.fixture(autouse=True)
@@ -29,32 +29,9 @@ def _clean_environment(monkeypatch):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
 
-class Recorder:
-    """An in-memory stand-in for the bar, capturing what the CLI sends."""
+def test_a_successful_draw_says_nothing(bar_transport):
+    bar_transport.add("POST", DRAW_PATH)
 
-    def __init__(self) -> None:
-        self.requests: list = []
-        self.status = 200
-        self.body: dict[str, str] = {"result": "ok"}
-
-    def callback(self, request):
-        self.requests.append(request)
-        return (self.status, {}, json.dumps(self.body))
-
-
-@pytest.fixture
-def recorder():
-    """Route the CLI's requests through a responses-registered callback."""
-    recorder = Recorder()
-    with responses.RequestsMock(assert_all_requests_are_fired=False) as mock:
-        mock.add_callback(responses.POST, DRAW_URL_PATTERN, callback=recorder.callback, content_type="application/json")
-        mock.add_callback(
-            responses.DELETE, DRAW_URL_PATTERN, callback=recorder.callback, content_type="application/json"
-        )
-        yield recorder
-
-
-def test_a_successful_draw_says_nothing(recorder):
     result = CliRunner().invoke(cli.main, ["text", "BUILD OK"], env=ENV)
 
     assert result.exit_code == 0
@@ -62,59 +39,70 @@ def test_a_successful_draw_says_nothing(recorder):
     assert result.stderr == ""
 
 
-def test_text_sends_the_string_to_the_bar(recorder):
+def test_text_sends_the_string_to_the_bar(bar_transport):
+    bar_transport.add("POST", DRAW_PATH)
+
     CliRunner().invoke(cli.main, ["text", "BUILD OK"], env=ENV)
 
-    assert len(recorder.requests) == 1
-    assert recorder.requests[0].method == "POST"
-    body = json.loads(recorder.requests[0].body)
+    assert len(bar_transport.calls) == 1
+    assert bar_transport.calls[0].method == "POST"
+    body = json.loads(bar_transport.calls[0].content)
     assert body["elements"][0]["text"] == "BUILD OK"
 
 
-def test_options_reach_the_payload(recorder):
+def test_options_reach_the_payload(bar_transport):
+    bar_transport.add("POST", DRAW_PATH)
+
     CliRunner().invoke(
         cli.main,
         ["text", "hi", "--color", "red", "--timeout", "30", "--font", "small", "--scroll-rate", "600"],
         env=ENV,
     )
 
-    element = json.loads(recorder.requests[0].body)["elements"][0]
+    element = json.loads(bar_transport.calls[0].content)["elements"][0]
     assert element["color"] == "#FF0000FF"
     assert element["timeout"] == 30
     assert element["font"] == "small"
     assert element["scroll_rate"] == 600
 
 
-def test_token_flag_overrides_the_environment(recorder):
+def test_token_flag_overrides_the_environment(bar_transport):
+    bar_transport.add("POST", DRAW_PATH)
+
     CliRunner().invoke(cli.main, ["text", "hi", "--token", "flagtoken"], env=ENV)
 
-    assert recorder.requests[0].headers["X-API-Token"] == "flagtoken"
+    assert bar_transport.calls[0].headers["X-API-Token"] == "flagtoken"
 
 
-def test_clear_issues_a_delete(recorder):
+def test_clear_issues_a_delete(bar_transport):
+    bar_transport.add("DELETE", DRAW_PATH)
+
     result = CliRunner().invoke(cli.main, ["clear"], env=ENV)
 
     assert result.exit_code == 0
-    assert recorder.requests[0].method == "DELETE"
+    assert bar_transport.calls[0].method == "DELETE"
 
 
-def test_host_flag_overrides_the_environment(recorder):
+def test_host_flag_overrides_the_environment(bar_transport):
+    bar_transport.add("POST", DRAW_PATH)
+
     CliRunner().invoke(cli.main, ["text", "hi", "--host", "192.168.1.5"], env=ENV)
 
-    assert recorder.requests[0].url.startswith("http://192.168.1.5")
+    assert str(bar_transport.calls[0].url).startswith("http://192.168.1.5")
 
 
-def test_no_configuration_uses_the_usb_default_and_sends_no_token(recorder):
+def test_no_configuration_uses_the_usb_default_and_sends_no_token(bar_transport):
+    bar_transport.add("POST", DRAW_PATH)
+
     result = CliRunner().invoke(cli.main, ["text", "hi"], env={})
 
     assert result.exit_code == 0
-    assert recorder.requests[0].url.startswith("http://10.0.4.20")
-    assert "X-API-Token" not in recorder.requests[0].headers
+    assert str(bar_transport.calls[0].url).startswith("http://10.0.4.20")
+    assert "X-API-Token" not in bar_transport.calls[0].headers
 
 
-def test_a_rejected_request_exits_one(recorder):
-    recorder.status = 401
-    recorder.body = {"error": "unauthorized"}
+def test_a_rejected_request_exits_one(bar_transport):
+    bar_transport.add("POST", DRAW_PATH, status=401, json={"error": "unauthorized"})
 
     result = CliRunner().invoke(cli.main, ["text", "hi"], env=ENV)
 
@@ -134,7 +122,7 @@ def test_an_unknown_font_is_a_usage_error():
     assert result.exit_code == 2
 
 
-def test_an_invalid_colour_exits_one(recorder):
+def test_an_invalid_colour_exits_one():
     result = CliRunner().invoke(cli.main, ["text", "hi", "--color", "chartreuseish"], env=ENV)
 
     assert result.exit_code == 1
@@ -163,7 +151,9 @@ def test_version_prints_the_installed_version_and_exits_zero():
     assert result.output.strip() == f"busyboy, version {metadata.version('busyboy')}"
 
 
-def test_verbose_on_a_successful_draw_still_exits_zero(recorder):
+def test_verbose_on_a_successful_draw_still_exits_zero(bar_transport):
+    bar_transport.add("POST", DRAW_PATH)
+
     result = CliRunner().invoke(cli.main, ["text", "hi", "--verbose"], env=ENV)
 
     assert result.exit_code == 0
@@ -172,11 +162,10 @@ def test_verbose_on_a_successful_draw_still_exits_zero(recorder):
 GITHUB_RUNS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/actions/workflows/42/runs"
 GITHUB_PULLS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/pulls"
 GITHUB_WORKFLOWS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/actions/workflows"
-UPLOAD_URL_PATTERN = re.compile(r"^http://[^/]+/api/assets/upload")
 
 
 @pytest.fixture
-def github_bar(monkeypatch):
+def github_bar(bar_transport, monkeypatch):
     """Register a whole happy-path watch: token, git, GitHub, and the bar."""
     monkeypatch.setattr(cli.github, "resolve_token", lambda: "gho_test")
     monkeypatch.setattr(cli.git, "current_branch", lambda: "feature/x")
@@ -192,9 +181,10 @@ def github_bar(monkeypatch):
         json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
     )
     responses.add(responses.GET, GITHUB_PULLS_URL, json=[{"number": 12}])
-    responses.add(responses.POST, UPLOAD_URL_PATTERN, json={"result": "ok"})
-    responses.add(responses.POST, DRAW_URL_PATTERN, json={"result": "ok"})
-    responses.add(responses.DELETE, DRAW_URL_PATTERN, json={"result": "ok"})
+    bar_transport.add("POST", UPLOAD_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    bar_transport.add("DELETE", DRAW_PATH)
+    return bar_transport
 
 
 def stop_after_one_tick(monkeypatch):
@@ -214,12 +204,9 @@ def test_watching_a_workflow_draws_and_exits_cleanly(github_bar, monkeypatch):
 
     assert result.exit_code == 0
     assert result.output == ""
-    draws = [
-        call for call in responses.calls if call.request.method == "POST" and "display/draw" in (call.request.url or "")
-    ]
+    draws = [call for call in github_bar.calls if call.method == "POST" and call.url.path == DRAW_PATH]
     assert len(draws) == 1
-    assert draws[0].request.body is not None
-    body = json.loads(draws[0].request.body)
+    body = json.loads(draws[0].content)
     elements = {element["id"]: element for element in body["elements"]}
     assert elements["repo"]["text"] == "mb-dot-dev/busyboy"
     assert elements["ref"]["text"] == "#12 CI"
@@ -276,7 +263,6 @@ def test_a_malformed_repo_is_a_usage_error_even_without_a_github_token(monkeypat
     assert "owner/name" in result.stderr
 
 
-@responses.activate
 def test_a_missing_token_exits_one_with_one_line(monkeypatch):
     def no_token():
         raise exceptions.GitHubError(github.NO_TOKEN_MESSAGE)

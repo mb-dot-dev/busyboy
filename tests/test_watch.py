@@ -1,7 +1,8 @@
 """Tests for the workflow poll loop."""
 
-import re
+import time
 
+import httpx2
 import pytest
 import requests
 import responses
@@ -16,7 +17,8 @@ TOKEN = "gho_test"
 
 RUNS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/actions/workflows/42/runs"
 PULLS_URL = "https://api.github.com/repos/mb-dot-dev/busyboy/pulls"
-DRAW_URL = re.compile(r"^http://[^/]+/api/display/draw")
+DRAW_PATH = "/api/display/draw"
+UPLOAD_PATH = "/api/assets/upload"
 
 
 @pytest.fixture(autouse=True)
@@ -82,55 +84,56 @@ def test_without_a_pull_request_the_branch_name_is_shown():
 
 
 @responses.activate
-def test_a_tick_draws_the_current_state(config):
+def test_a_tick_draws_the_current_state(config, bar_transport):
     responses.add(
         responses.GET,
         RUNS_URL,
         json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
     )
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
-    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    bar_transport.add("POST", DRAW_PATH)
 
     result = watch.tick(config, TOKEN, TARGET, None)
 
     assert result.screen == watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
     assert result.retry_after is None
-    assert len(responses.calls) == 3
+    assert len(responses.calls) == 2
+    assert len(bar_transport.calls) == 1
 
 
 @responses.activate
-def test_an_unchanged_state_is_not_redrawn(config):
+def test_an_unchanged_state_is_not_redrawn(config, bar_transport):
     responses.add(
         responses.GET,
         RUNS_URL,
         json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
     )
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
-    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    bar_transport.add("POST", DRAW_PATH)
 
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
     result = watch.tick(config, TOKEN, TARGET, previous)
 
     assert result.screen == previous
-    assert not [call for call in responses.calls if call.request.method == "POST"]
+    assert bar_transport.calls == []
 
 
 @responses.activate
-def test_a_changed_state_is_redrawn(config):
+def test_a_changed_state_is_redrawn(config, bar_transport):
     responses.add(
         responses.GET,
         RUNS_URL,
         json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "failure"}]},
     )
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
-    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    bar_transport.add("POST", DRAW_PATH)
 
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
     result = watch.tick(config, TOKEN, TARGET, previous)
 
     assert result.screen is not None
     assert result.screen.icon == "failure"
-    assert [call for call in responses.calls if call.request.method == "POST"]
+    assert len(bar_transport.calls) == 1
 
 
 @responses.activate
@@ -192,7 +195,7 @@ def test_a_rejected_github_token_is_not_swallowed(config):
 
 
 @responses.activate
-def test_a_non_ascii_branch_name_completes_and_draws_instead_of_raising(config):
+def test_a_non_ascii_branch_name_completes_and_draws_instead_of_raising(config, bar_transport):
     unicode_target = watch.Target(repo=REPO, branch="feature/café", workflow=WORKFLOW)
     responses.add(
         responses.GET,
@@ -200,25 +203,25 @@ def test_a_non_ascii_branch_name_completes_and_draws_instead_of_raising(config):
         json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
     )
     responses.add(responses.GET, PULLS_URL, json=[])
-    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    bar_transport.add("POST", DRAW_PATH)
 
     result = watch.tick(config, TOKEN, unicode_target, None)
 
     assert result.screen is not None
     assert result.screen.icon == "success"
-    assert [call for call in responses.calls if call.request.method == "POST"]
+    assert len(bar_transport.calls) == 1
 
 
 @responses.activate
-def test_an_unreachable_bar_keeps_the_previous_state(config, monkeypatch):
-    monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
+def test_an_unreachable_bar_keeps_the_previous_state(config, bar_transport, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
     responses.add(
         responses.GET,
         RUNS_URL,
         json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "failure"}]},
     )
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
-    responses.add(responses.POST, DRAW_URL, body=requests.exceptions.ConnectionError("boom"))
+    bar_transport.add("POST", DRAW_PATH, error=httpx2.ConnectError("boom"))
 
     previous = watch.Screen(repo_label="mb-dot-dev/busyboy", ref_label="#12 CI", icon="success")
 
@@ -226,16 +229,16 @@ def test_an_unreachable_bar_keeps_the_previous_state(config, monkeypatch):
 
 
 @responses.activate
-def test_the_loop_uploads_icons_then_polls_until_interrupted(config):
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+def test_the_loop_uploads_icons_then_polls_until_interrupted(config, bar_transport):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", UPLOAD_PATH)
     responses.add(
         responses.GET,
         RUNS_URL,
         json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
     )
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
-    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    bar_transport.add("POST", DRAW_PATH)
 
     slept: list[float] = []
 
@@ -247,41 +250,39 @@ def test_the_loop_uploads_icons_then_polls_until_interrupted(config):
     watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
 
     assert slept == [10, 10]
-    uploads = [call for call in responses.calls if "assets/upload" in (call.request.url or "")]
+    uploads = [call for call in bar_transport.calls if call.url.path == UPLOAD_PATH]
     assert len(uploads) == len(bar.ICON_NAMES)
-    deletes = [call for call in responses.calls if call.request.method == "DELETE"]
+    deletes = [call for call in bar_transport.calls if call.method == "DELETE"]
     assert len(deletes) == 2
 
 
 @responses.activate
-def test_clear_precedes_the_first_draw(config):
+def test_clear_precedes_the_first_draw(config, bar_transport):
     """A stale element from another busyboy invocation must be gone before the workflow layout is drawn."""
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", UPLOAD_PATH)
     responses.add(
         responses.GET,
         RUNS_URL,
         json={"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success"}]},
     )
     responses.add(responses.GET, PULLS_URL, json=[{"number": 12}])
-    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
+    bar_transport.add("POST", DRAW_PATH)
 
     def sleep(seconds):
         raise KeyboardInterrupt
 
     watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
 
-    draw_calls = [
-        call for call in responses.calls if call.request.url is not None and "/api/display/draw" in call.request.url
-    ]
-    methods = [call.request.method for call in draw_calls]
+    draw_calls = [call for call in bar_transport.calls if call.url.path == DRAW_PATH]
+    methods = [call.method for call in draw_calls]
     assert methods.index("DELETE") < methods.index("POST")
 
 
 @responses.activate
-def test_the_loop_waits_at_least_retry_after_when_rate_limited(config):
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+def test_the_loop_waits_at_least_retry_after_when_rate_limited(config, bar_transport):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", UPLOAD_PATH)
     responses.add(
         responses.GET,
         RUNS_URL,
@@ -302,9 +303,9 @@ def test_the_loop_waits_at_least_retry_after_when_rate_limited(config):
 
 
 @responses.activate
-def test_an_unparseable_retry_after_does_not_change_the_wait(config):
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+def test_an_unparseable_retry_after_does_not_change_the_wait(config, bar_transport):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", UPLOAD_PATH)
     responses.add(
         responses.GET,
         RUNS_URL,
@@ -325,12 +326,12 @@ def test_an_unparseable_retry_after_does_not_change_the_wait(config):
 
 
 @responses.activate
-def test_an_interrupt_clears_the_display(config):
-    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+def test_an_interrupt_clears_the_display(config, bar_transport):
+    bar_transport.add("POST", UPLOAD_PATH)
     responses.add(responses.GET, RUNS_URL, json={"workflow_runs": []})
     responses.add(responses.GET, PULLS_URL, json=[])
-    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
+    bar_transport.add("POST", DRAW_PATH)
+    bar_transport.add("DELETE", DRAW_PATH)
 
     def sleep(seconds):
         raise KeyboardInterrupt
@@ -338,32 +339,32 @@ def test_an_interrupt_clears_the_display(config):
     watch.watch(config, TOKEN, TARGET, interval=10, sleep=sleep)
 
     # One DELETE clears stale elements before the loop starts, a second clears on the way out.
-    deletes = [call for call in responses.calls if call.request.method == "DELETE"]
+    deletes = [call for call in bar_transport.calls if call.method == "DELETE"]
     assert len(deletes) == 2
 
 
 @responses.activate
-def test_a_fatal_error_still_clears_the_display(config):
-    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+def test_a_fatal_error_still_clears_the_display(config, bar_transport):
+    bar_transport.add("POST", UPLOAD_PATH)
     responses.add(responses.GET, RUNS_URL, json={"message": "Bad credentials"}, status=401)
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
+    bar_transport.add("DELETE", DRAW_PATH)
 
     with pytest.raises(exceptions.GitHubAuthError):
         watch.watch(config, TOKEN, TARGET, interval=10, sleep=lambda seconds: None)
 
-    assert [call for call in responses.calls if call.request.method == "DELETE"]
+    assert [call for call in bar_transport.calls if call.method == "DELETE"]
 
 
 @responses.activate
-def test_a_bar_that_dies_during_cleanup_does_not_mask_the_interrupt(config, monkeypatch):
-    monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
+def test_a_bar_that_dies_during_cleanup_does_not_mask_the_interrupt(config, bar_transport, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
     # The first DELETE (the pre-loop clear) succeeds; the second (cleanup on exit) fails.
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"result": "ok"})
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", UPLOAD_PATH)
     responses.add(responses.GET, RUNS_URL, json={"workflow_runs": []})
     responses.add(responses.GET, PULLS_URL, json=[])
-    responses.add(responses.POST, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.DELETE, DRAW_URL, body=requests.exceptions.ConnectionError("boom"))
+    bar_transport.add("POST", DRAW_PATH)
+    bar_transport.add("DELETE", DRAW_PATH, error=httpx2.ConnectError("boom"))
 
     def sleep(seconds):
         raise KeyboardInterrupt
@@ -372,9 +373,9 @@ def test_a_bar_that_dies_during_cleanup_does_not_mask_the_interrupt(config, monk
 
 
 @responses.activate
-def test_a_failed_icon_upload_stops_before_the_loop(config):
-    responses.add(responses.DELETE, DRAW_URL, json={"result": "ok"})
-    responses.add(responses.POST, re.compile(r"^http://[^/]+/api/assets/upload"), json={"error": "no"}, status=401)
+def test_a_failed_icon_upload_stops_before_the_loop(config, bar_transport):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", UPLOAD_PATH, status=401, json={"error": "no"})
 
     with pytest.raises(exceptions.BarError):
         watch.watch(config, TOKEN, TARGET, interval=10, sleep=lambda seconds: None)
