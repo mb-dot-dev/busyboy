@@ -1,11 +1,12 @@
 """Tests for exit codes and output of the busyboy command line."""
 
+from importlib import metadata
 import json
 import re
 
-from click.testing import CliRunner
 import pytest
 import responses
+from typer.testing import CliRunner
 
 from busyboy import cli, exceptions, github
 
@@ -149,6 +150,19 @@ def test_help_lists_all_subcommands():
     assert "gh" in result.output
 
 
+def test_version_prints_the_installed_version_and_exits_zero():
+    """
+    Typer has no version_option, so --version is busyboy's own eager callback.
+
+    It has to work without a subcommand, which is what is_eager guards: without
+    it the group would demand a COMMAND before the callback ever ran.
+    """
+    result = CliRunner().invoke(cli.main, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == f"busyboy, version {metadata.version('busyboy')}"
+
+
 def test_verbose_on_a_successful_draw_still_exits_zero(recorder):
     result = CliRunner().invoke(cli.main, ["text", "hi", "--verbose"], env=ENV)
 
@@ -244,9 +258,9 @@ def test_a_malformed_repo_is_a_usage_error_even_without_a_github_token(monkeypat
     """
     A bad option is a usage error regardless of the environment.
 
-    --repo is validated while Click parses parameters, before the command body
-    resolves a token, so a developer with no gh login still gets exit 2 and a
-    message about the option they got wrong -- not exit 1 about a missing
+    --repo is validated while the command line is parsed, before the command
+    body resolves a token, so a developer with no gh login still gets exit 2
+    and a message about the option they got wrong -- not exit 1 about a missing
     token. Without that ordering this test fails in CI and passes locally,
     purely on whether `gh auth token` happens to work.
     """

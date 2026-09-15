@@ -42,7 +42,7 @@ REQUEST_TIMEOUT = (5, 10)
 
 # bar.MeasuredFontName is every font except "global", which selects whatever font the device is configured
 # for rather than naming a size, so it has no fixed height to measure or to stack. Deriving the list from
-# that type rather than filtering bar.FONT_NAMES here keeps one definition of "measurable" — this tool
+# that type rather than filtering bar.DisplayFontName here keeps one definition of "measurable" — this tool
 # produces the tables bar.py is keyed by, so the two drifting apart is exactly the bug to design out.
 # get_args() is untyped (tuple[Any, ...]), so one cast is unavoidable.
 MEASURABLE_FONTS: tuple[bar.MeasuredFontName, ...] = cast(

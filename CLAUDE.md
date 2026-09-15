@@ -31,10 +31,10 @@ commands use `--frozen` and expect the lockfile to already match.
 ## Architecture
 
 Seven modules (plus a packaged asset directory) with one job each. Keep the boundaries: `config.py` imports
-neither Click nor `bar.py`; `bar.py` knows nothing about argv or the environment; `cli.py` holds no BUSY Bar
-payload knowledge; `git.py` knows nothing about GitHub, the bar, or Click; `github.py` knows nothing about the
-bar, Click, or `git.py`; and `watch.py` is the **only** module allowed to import both `bar` and `github` — it
-knows nothing about Click or argv itself. `git.py` and `github.py` must never import each other. That rule is
+neither Typer nor `bar.py`; `bar.py` knows nothing about argv or the environment; `cli.py` holds no BUSY Bar
+payload knowledge; `git.py` knows nothing about GitHub, the bar, or Typer; `github.py` knows nothing about the
+bar, Typer, or `git.py`; and `watch.py` is the **only** module allowed to import both `bar` and `github` — it
+knows nothing about Typer or argv itself. `git.py` and `github.py` must never import each other. That rule is
 why `git.origin_repo()` returns a bare `tuple[str, str]` rather than a `github.Repo`: a `git.py` function
 returning a GitHub-typed value would create exactly the import edge the boundary forbids, so `cli.py` — which
 is allowed to know about both — does the `github.Repo(owner=owner, name=name)` construction itself.
@@ -47,11 +47,11 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
 - `src/busyboy/git.py` — local checkout inspection only: `current_branch()`, `origin_repo()`, and
   `parse_remote_url()` for the owner/name out of any remote URL form git accepts. Shells out to `git` via
   `subprocess`, redacting any userinfo credentials embedded in a remote URL before they can reach a log line or
-  an exception message. Raises `GitError`. Knows nothing about GitHub's API, the bar, or Click.
+  an exception message. Raises `GitError`. Knows nothing about GitHub's API, the bar, or Typer.
 - `src/busyboy/github.py` — GitHub token resolution (`resolve_token`: `gh auth token`, then `GITHUB_TOKEN`) and
   REST queries (`resolve_workflow`, `latest_run`, `pull_request_number`) via plain `requests` calls through the
   single `_get` helper, which classifies every failure as fatal (`GitHubError`/`GitHubAuthError`) or retryable
-  (`GitHubTransientError`) — see Exception hierarchy below. Knows nothing about the bar, Click, or `git.py`.
+  (`GitHubTransientError`) — see Exception hierarchy below. Knows nothing about the bar, Typer, or `git.py`.
 - `src/busyboy/bar.py` — `build_text_payload` and `build_workflow_payload` (both pure, no I/O), `draw_text`,
   `clear`, `upload_icons`, the payload models (`TextElement`, `ImageElement`, `DisplayElements`), and the
   `requests`-based transport itself. `_request` takes a `path` argument rather than a fixed endpoint, so it
@@ -61,14 +61,17 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
   upload, and delivery.
 - `src/busyboy/watch.py` — the poll loop: `tick` (one fetch-render-diff-draw cycle) and `watch` (the `while
   True`, Ctrl+C, and cleanup around it). The only module that imports both `bar` and `github`, because turning a
-  GitHub run into bar pixels is its entire job. Knows nothing about Click or argv — `cli.py` builds its
+  GitHub run into bar pixels is its entire job. Knows nothing about Typer or argv — `cli.py` builds its
   `Target` and passes it in. `render` composes the bottom row as the ref (`#123` for an open pull request,
   otherwise the branch) followed by the workflow's display name, so two workflows in the same repository on
   the same branch are distinguishable on the bar.
 - `src/busyboy/exceptions.py` — the exception hierarchy (see below) and `format_delivery_error(error) -> str`,
   the one-line renderer `cli.py` prints to stderr.
-- `src/busyboy/cli.py` — the `main` Click group; the `text` and `clear` subcommands; the `gh` subgroup and its
-  `workflow` subcommand; and the error-to-exit-code mapping in `_handle_errors`.
+- `src/busyboy/cli.py` — the `main` Typer app; the `text` and `clear` subcommands; the `gh` sub-app (added
+  with `main.add_typer`) and its `workflow` subcommand; the `--version` callback; and the error-to-exit-code
+  mapping in `_handle_errors`. Typer builds each command's parameters from its signature rather than from
+  stacked decorators, so the three shared connection options live in the `HostOption`, `TokenOption`, and
+  `VerboseOption` `Annotated` aliases at the top of the module, spelled into every command's signature.
 - `src/busyboy/__init__.py` — re-exports `main` so `[project.scripts] busyboy = "busyboy:main"` keeps working.
   Do not put logic here.
 - `src/busyboy/assets/` — six packaged status icon PNGs (`success`, `failure`, `pending`, `in_progress`,
@@ -102,7 +105,8 @@ retry-versus-exit distinction matters; catching their shared parent erases it.
 
 ### CLI contract
 
-Success is silent with exit 0. Expected failures print one line to stderr and exit 1; Click usage errors exit 2.
+Success is silent with exit 0. Expected failures print one line to stderr and exit 1 (`_fail` writes the line
+and raises `typer.Exit(1)`); Typer usage errors exit 2, rendered by Rich as a bordered panel.
 `--verbose` sets the root logger to `DEBUG` (surfacing `urllib3`'s own per-connection request logging) and lets
 the original exception propagate for a traceback.
 
@@ -120,7 +124,7 @@ failed icon upload). Once inside the poll loop, it stops behaving like every oth
 failures (`GitHubTransientError`) and bar delivery failures (`BarError`) are swallowed rather than raised, and
 only logged at DEBUG — visible under `--verbose`, but they never print to stderr or end the process on their
 own. See Exception hierarchy above for why `GitHubAuthError` is the one GitHub failure that still ends the
-watch. A malformed `--repo` (anything that isn't `owner/name`) is a Click usage error and exits 2, like any
+watch. A malformed `--repo` (anything that isn't `owner/name`) is a Typer usage error and exits 2, like any
 other bad option.
 
 The GitHub token comes from `gh auth token` first, then the `GITHUB_TOKEN` environment variable
@@ -159,8 +163,31 @@ the leak is of the raw input rather than the coerced field. `load_config` raises
 specifically to break that chain; keep it that way even though `host` and `token` both have defaults now and no
 `missing` error can currently be produced — a future required field would reintroduce the same risk.
 
-**`click.Choice` returns `str`**, so passing it to `bar.DisplayFontName` (a `Literal`) needs a `cast`. That
-cast is legitimate — the parser has already restricted the value.
+**Typer turns a `Literal` annotation into a choice, so `--font` needs no `cast`.** `font` is annotated
+`bar.DisplayFontName` directly; Typer derives the same choice list the old `click.Choice(bar.FONT_NAMES)`
+produced, and hands back a value the type checker already knows is one of the literals. That is why
+`bar.FONT_NAMES` is gone — it existed only because `click.Choice` wanted a `Sequence[str]`. Do not
+reintroduce a parallel tuple or enum of font names; the `Literal` is the single source.
+
+**`_handle_errors`' `functools.wraps` is load-bearing under Typer, not a nicety.** Typer reads a command's
+parameters from `inspect.signature` and `get_type_hints` of whatever function it is handed — here, the
+wrapper. `functools.wraps` copies `__annotations__` and `__wrapped__` across, which is the only reason the
+wrapped command's signature still reaches Typer. Drop it and every command loses all its options.
+
+**`--repo` uses `typer.Option(parser=...)`, not a Click-style `(ctx, param, value)` callback.** The parser is
+a plain `str -> github.Repo` callable that Typer turns into the parameter's click type, which is what lets
+the parameter be annotated `github.Repo | None` and still type-check. It still runs during parsing, which is
+the point — see `_parse_repo`'s docstring. A parser is never called for an omitted option: parameters skip
+type conversion when their value is `None`, so no `None` branch is needed (or reachable) inside it.
+
+**Typer's `--version` is hand-rolled; there is no `click.version_option` equivalent.** `_show_version` is an
+eager option callback on the `@main.callback()` group that echoes `importlib.metadata.version("busyboy")` and
+raises `typer.Exit`. It must stay `is_eager=True` so `--version` works without a subcommand.
+
+**`typer.Typer(pretty_exceptions_enable=False)` is required by the CLI contract.** Typer's default Rich
+traceback handler would reformat the traceback that `--verbose` exists to expose. `no_args_is_help=True` is
+also explicit on both apps: Typer's own default is `False`, which would turn a bare `busyboy` into an error
+instead of the help screen Click's `Group` printed.
 
 **`watch.watch`'s `sleep` parameter defaults to `None`, not `time.sleep`.** The body resolves it with `sleep if
 sleep is not None else time.sleep`. A default bound at function-definition time (`sleep: Callable = time.sleep`)
@@ -215,7 +242,9 @@ change against the CI environment rather than yours, put a `gh` that exits non-z
   in `tests/test_bar.py`). HTTP error responses are never retried, regardless of status code.
 - `tests/test_cli.py` registers a `responses` callback matching any host (`re.compile(r"^http://[^/]+/api/display/draw")`)
   so the `--host` override test doesn't need special-casing.
-- Click 8.2+ removed `CliRunner(mix_stderr=...)`. `result.output` is stdout only; `result.stderr` is separate.
+- `tests/test_cli.py` drives the app with `typer.testing.CliRunner`, which takes the `typer.Typer` instance
+  (`cli.main`) directly. Click 8.2+ removed `CliRunner(mix_stderr=...)`: `result.stderr` is its own stream,
+  and `result.output` is **both** streams interleaved in write order — not stdout alone.
 - Tests that touch config must clear `BUSYBOY_HOST` / `BUSYBOY_TOKEN` (there is an autouse fixture for this) or
   they will pick up a real environment.
 
