@@ -2,12 +2,11 @@
 
 import json
 import struct
-from urllib.parse import parse_qs, urlparse
+import time
 
+import httpx2
 from pydantic import ValidationError
 import pytest
-import requests
-import responses
 
 from busyboy import bar, exceptions
 from busyboy.config import load_config
@@ -99,107 +98,89 @@ def test_non_ascii_text_is_rejected():
         bar.build_text_payload("héllo")
 
 
-@responses.activate
-def test_draw_text_posts_the_payload(config):
-    responses.add(responses.POST, "http://10.0.4.20/api/display/draw", json={"result": "ok"}, status=200)
+def test_draw_text_posts_the_payload(config, bar_transport):
+    bar_transport.add("POST", "/api/display/draw")
 
     payload = bar.build_text_payload("BUILD OK")
     bar.draw_text(config, payload)
 
-    assert len(responses.calls) == 1
-    request = responses.calls[0].request
+    assert len(bar_transport.calls) == 1
+    request = bar_transport.calls[0]
     assert request.method == "POST"
-    assert urlparse(request.url).path == "/api/display/draw"
+    assert request.url.path == "/api/display/draw"
     assert request.headers["X-API-Token"] == "testtoken"
-    assert request.body is not None
-    body = json.loads(request.body)
+    body = json.loads(request.content)
     assert body["elements"][0]["text"] == "BUILD OK"
 
 
-@responses.activate
-def test_clear_deletes_the_drawing(config):
-    responses.add(responses.DELETE, "http://10.0.4.20/api/display/draw", json={"result": "ok"}, status=200)
+def test_clear_deletes_the_drawing(config, bar_transport):
+    bar_transport.add("DELETE", "/api/display/draw")
 
     bar.clear(config)
 
-    assert len(responses.calls) == 1
-    request = responses.calls[0].request
+    assert len(bar_transport.calls) == 1
+    request = bar_transport.calls[0]
     assert request.method == "DELETE"
-    assert urlparse(request.url).query == "application_name=busyboy"
+    assert dict(request.url.params) == {"application_name": "busyboy"}
 
 
-@responses.activate
-def test_draw_text_omits_the_token_header_when_none_is_configured():
-    responses.add(responses.POST, "http://10.0.4.20/api/display/draw", json={"result": "ok"}, status=200)
+def test_draw_text_omits_the_token_header_when_none_is_configured(bar_transport):
+    bar_transport.add("POST", "/api/display/draw")
 
     config = load_config(host="10.0.4.20")
     payload = bar.build_text_payload("BUILD OK")
     bar.draw_text(config, payload)
 
-    assert "X-API-Token" not in responses.calls[0].request.headers
+    assert "X-API-Token" not in bar_transport.calls[0].headers
 
 
-@responses.activate
-def test_a_rejected_request_raises(config):
-    responses.add(responses.DELETE, "http://10.0.4.20/api/display/draw", json={"error": "unauthorized"}, status=401)
+def test_a_rejected_request_raises(config, bar_transport):
+    bar_transport.add("DELETE", "/api/display/draw", status=401, json={"error": "unauthorized"})
 
     with pytest.raises(exceptions.BarError):
         bar.clear(config)
 
-    assert len(responses.calls) == 1
+    assert len(bar_transport.calls) == 1
 
 
-@responses.activate
-def test_a_connection_failure_retries_then_raises(config, monkeypatch):
-    monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
-    responses.add(
-        responses.POST,
-        "http://10.0.4.20/api/display/draw",
-        body=requests.exceptions.ConnectionError("boom"),
-    )
-
-    payload = bar.build_text_payload("BUILD OK")
-    with pytest.raises(exceptions.BarRequestError):
-        bar.draw_text(config, payload)
-
-    assert len(responses.calls) == bar.MAX_RETRIES + 1
-
-
-@responses.activate
-def test_a_non_transient_request_error_is_not_retried(config, monkeypatch):
-    monkeypatch.setattr(bar.time, "sleep", lambda seconds: None)
-    responses.add(
-        responses.POST,
-        "http://10.0.4.20/api/display/draw",
-        body=requests.exceptions.InvalidURL("bad url"),
-    )
-
-    payload = bar.build_text_payload("BUILD OK")
-    with pytest.raises(exceptions.BarRequestError):
-        bar.draw_text(config, payload)
-
-    assert len(responses.calls) == 1
-
-
-@responses.activate
-def test_a_request_reports_the_path_it_actually_used(config):
-    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"error": "nope"}, status=401)
+def test_a_rejected_request_reports_its_status_and_path(config, bar_transport):
+    bar_transport.add("DELETE", "/api/display/draw", status=401, json={"error": "unauthorized", "code": 7})
 
     with pytest.raises(exceptions.BarAPIError) as caught:
-        bar._request(config, "POST", "/api/assets/upload", data=b"x", content_type="application/octet-stream")
+        bar.clear(config)
 
-    assert caught.value.path == "/api/assets/upload"
+    assert caught.value.status_code == 401
+    assert caught.value.code == 7
+    assert caught.value.path == "/api/display/draw"
+    assert caught.value.method == "DELETE"
 
 
-@responses.activate
-def test_a_request_sends_a_raw_body_with_its_content_type(config):
-    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"result": "ok"}, status=200)
+def test_a_connection_failure_retries_then_raises(config, bar_transport, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    bar_transport.add("POST", "/api/display/draw", error=httpx2.ConnectError("boom"))
 
-    bar._request(config, "POST", "/api/assets/upload", data=b"\x89PNG", content_type="application/octet-stream")
+    payload = bar.build_text_payload("BUILD OK")
+    with pytest.raises(exceptions.BarRequestError) as caught:
+        bar.draw_text(config, payload)
 
-    request = responses.calls[0].request
-    assert request.body == b"\x89PNG"
-    assert request.headers["Content-Type"] == "application/octet-stream"
+    assert len(bar_transport.calls) == 3
+    assert caught.value.attempts == 3
+
+
+def test_a_non_api_delivery_failure_still_maps_to_a_bar_error(config, monkeypatch):
+    """A successful-status response busylib can't parse still surfaces as a one-line BarError, not a raw crash."""
+    real_busy_bar = bar.busylib.BusyBar
+
+    def responder(_request):
+        return httpx2.Response(200, content=b"not json", headers={"content-type": "text/plain"})
+
+    def fake_busy_bar(addr, *, token=None, **_kwargs):
+        return real_busy_bar(addr, token=token, transport=httpx2.MockTransport(responder))
+
+    monkeypatch.setattr(bar.busylib, "BusyBar", fake_busy_bar)
+
+    with pytest.raises(exceptions.BarRequestError):
+        bar.clear(config)
 
 
 def test_every_icon_ships_as_a_12x12_rgba_png():
@@ -313,28 +294,23 @@ def test_a_pure_ascii_label_passes_through_unchanged():
     assert elements["ref"]["text"] == "feature/x"
 
 
-@responses.activate
-def test_uploading_icons_posts_every_asset_scoped_to_the_application(config):
-    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"result": "ok"}, status=200)
+def test_uploading_icons_posts_every_asset_scoped_to_the_application(config, bar_transport):
+    bar_transport.add("POST", "/api/assets/upload")
 
     bar.upload_icons(config)
 
-    assert len(responses.calls) == len(bar.ICON_NAMES)
+    assert len(bar_transport.calls) == len(bar.ICON_NAMES)
     uploaded = set()
-    for call in responses.calls:
-        assert call.request.url is not None
-        query = parse_qs(urlparse(call.request.url).query)
-        assert query["application_name"] == ["busyboy"]
-        assert call.request.headers["Content-Type"] == "application/octet-stream"
-        assert call.request.body is not None
-        assert call.request.body[:8] == b"\x89PNG\r\n\x1a\n"
-        uploaded.add(query["file"][0])
+    for request in bar_transport.calls:
+        params = dict(request.url.params)
+        assert params["application_name"] == "busyboy"
+        assert request.content[:8] == b"\x89PNG\r\n\x1a\n"
+        uploaded.add(params["file"])
     assert uploaded == {f"{icon}.png" for icon in bar.ICON_NAMES}
 
 
-@responses.activate
-def test_a_failed_icon_upload_raises(config):
-    responses.add(responses.POST, "http://10.0.4.20/api/assets/upload", json={"error": "nope"}, status=401)
+def test_a_failed_icon_upload_raises(config, bar_transport):
+    bar_transport.add("POST", "/api/assets/upload", status=401, json={"error": "nope"})
 
     with pytest.raises(exceptions.BarError):
         bar.upload_icons(config)

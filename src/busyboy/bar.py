@@ -1,12 +1,12 @@
 """Construction and delivery of BUSY Bar display payloads."""
 
 from importlib import resources
-import time
-from typing import Literal, cast, get_args
+from typing import Literal, NoReturn, cast, get_args
 
+import busylib
+from busylib import exceptions as busylib_exceptions
 from pydantic import BaseModel, Field, field_validator
 from pydantic_extra_types.color import Color
-import requests
 
 from busyboy import exceptions
 from busyboy.config import BusyboyConfig
@@ -85,16 +85,6 @@ ROW_TWO_Y = 7
 REPO_ELEMENT_ID = "repo"
 REF_ELEMENT_ID = "ref"
 ICON_ELEMENT_ID = "icon"
-
-DISPLAY_DRAW_PATH = "/api/display/draw"
-ASSET_UPLOAD_PATH = "/api/assets/upload"
-
-# A 5s cap on establishing the connection, and a 10s cap on each individual
-# socket read (not an overall request budget — retries can each take up to
-# 15s).
-REQUEST_TIMEOUT = (5, 10)
-MAX_RETRIES = 2
-RETRY_BACKOFF_SECONDS = 0.25
 
 
 def _normalize_color(value: str | None) -> str | None:
@@ -245,100 +235,69 @@ def build_workflow_payload(*, repo_label: str, ref_label: str, icon: IconName) -
     )
 
 
-def _base_url(host: str) -> str:
-    """Normalize a bare host/IP to an http:// URL."""
-    return host if "://" in host else f"http://{host}"
-
-
-def _auth_headers(config: BusyboyConfig) -> dict[str, str]:
-    """Build the X-API-Token header, or no headers when no token is set."""
-    token = config.token_value
-    return {"X-API-Token": token} if token else {}
-
-
-def _raise_for_error_response(response: requests.Response, *, method: str, path: str) -> None:
-    """Convert an HTTP error response into a BarAPIError."""
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    error = payload.get("error") if isinstance(payload, dict) else None
-    code = payload.get("code") if isinstance(payload, dict) else None
-    raise exceptions.BarAPIError(
-        error or response.text or f"HTTP {response.status_code}",
-        code=code if isinstance(code, int) else None,
-        status_code=response.status_code,
-        method=method,
-        path=path,
-    )
-
-
-def _request(
-    config: BusyboyConfig,
-    method: str,
-    path: str,
-    *,
-    params: dict[str, str] | None = None,
-    json_body: dict[str, object] | None = None,
-    data: bytes | None = None,
-    content_type: str | None = None,
-) -> None:
+def _client(config: BusyboyConfig) -> busylib.BusyBar:
     """
-    Send one request to the bar, retrying transport-level failures.
+    Build a busylib client carrying busyboy's own host/token configuration for one call.
 
-    Only connection errors and timeouts are retried, up to MAX_RETRIES extra
-    attempts with growing backoff. An HTTP error response raises immediately,
-    and so does any other request failure (e.g. a malformed URL) — those are
-    deterministic, so retrying them would just add pointless backoff delay.
+    Callers close it with a plain `client.close()` in a `finally` block rather
+    than opening it as `with _client(config) as client:`. busylib's
+    `SyncClientBase.__enter__` is annotated to return `SyncClientBase` rather
+    than `Self`, which would erase the mixin methods (`display_draw`,
+    `assets_upload`, ...) from the type checker's view of `client` inside a
+    `with` block.
     """
-    url = f"{_base_url(config.host)}{path}"
-    headers = _auth_headers(config)
-    if content_type is not None:
-        headers["Content-Type"] = content_type
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            response = requests.request(
-                method,
-                url,
-                headers=headers,
-                params=params,
-                json=json_body,
-                data=data,
-                timeout=REQUEST_TIMEOUT,
-            )
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
-            if attempt >= MAX_RETRIES:
-                raise exceptions.BarRequestError(
-                    str(error),
-                    method=method,
-                    path=path,
-                    attempts=attempt + 1,
-                ) from error
-            time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
-            continue
-        except requests.exceptions.RequestException as error:
-            raise exceptions.BarRequestError(
-                str(error),
-                method=method,
-                path=path,
-                attempts=attempt + 1,
-            ) from error
-        try:
-            if response.status_code >= 400:
-                _raise_for_error_response(response, method=method, path=path)
-        finally:
-            response.close()
-        return
+    return busylib.BusyBar(config.host, token=config.token_value)
+
+
+def _reraise_as_bar_error(error: busylib_exceptions.BusyBarError) -> NoReturn:
+    """
+    Map a busylib delivery failure onto busyboy's own two-branch exception hierarchy.
+
+    `BusyBarAPIError` carries the HTTP status/response detail `BarAPIError`
+    needs. Every other `BusyBarError` — transport failures, and the rarer
+    protocol or response-shape errors busylib defines for its own broader
+    feature set — becomes `BarRequestError`, so `watch.tick` and the CLI can
+    keep treating "the bar delivery failed" as one thing regardless of which
+    busylib exception produced it.
+    """
+    if isinstance(error, busylib_exceptions.BusyBarAPIError):
+        raise exceptions.BarAPIError(
+            error.error,
+            code=error.code,
+            status_code=error.status_code or 0,
+            method=error.method or "",
+            path=error.path or "",
+        ) from error
+    if isinstance(error, busylib_exceptions.BusyBarRequestError):
+        raise exceptions.BarRequestError(
+            error.message,
+            method=error.method or "",
+            path=error.path or "",
+            attempts=error.attempts or 1,
+        ) from error
+    raise exceptions.BarRequestError(str(error), method="", path="", attempts=1) from error
 
 
 def draw_text(config: BusyboyConfig, payload: DisplayElements) -> None:
     """Send a draw payload to the bar."""
-    _request(config, "POST", DISPLAY_DRAW_PATH, json_body=payload.model_dump(exclude_none=True))
+    client = _client(config)
+    try:
+        client.display_draw(payload.model_dump(exclude_none=True))
+    except busylib_exceptions.BusyBarError as error:
+        _reraise_as_bar_error(error)
+    finally:
+        client.close()
 
 
 def clear(config: BusyboyConfig) -> None:
     """Remove what busyboy drew, without touching other applications' elements."""
-    _request(config, "DELETE", DISPLAY_DRAW_PATH, params={"application_name": APPLICATION_NAME})
+    client = _client(config)
+    try:
+        client.display_clear(application_name=APPLICATION_NAME)
+    except busylib_exceptions.BusyBarError as error:
+        _reraise_as_bar_error(error)
+    finally:
+        client.close()
 
 
 def icon_bytes(icon: IconName) -> bytes:
@@ -352,14 +311,13 @@ def upload_icons(config: BusyboyConfig) -> None:
 
     The upload is unconditional: the bar's API has no endpoint that lists an
     app's existing assets, and six ~200-byte requests cost less than the
-    machinery to avoid them.
+    machinery to avoid them. One client is reused across all six calls.
     """
-    for icon in ICON_NAMES:
-        _request(
-            config,
-            "POST",
-            ASSET_UPLOAD_PATH,
-            params={"application_name": APPLICATION_NAME, "file": f"{icon}.png"},
-            data=icon_bytes(icon),
-            content_type="application/octet-stream",
-        )
+    client = _client(config)
+    try:
+        for icon in ICON_NAMES:
+            client.assets_upload(APPLICATION_NAME, f"{icon}.png", icon_bytes(icon))
+    except busylib_exceptions.BusyBarError as error:
+        _reraise_as_bar_error(error)
+    finally:
+        client.close()

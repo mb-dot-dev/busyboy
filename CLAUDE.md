@@ -5,8 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 busyboy is a console application (CLI) that displays information on a BUSY Bar. It talks to the bar's HTTP
-API directly over `requests`, following the bar's own OpenAPI spec (vendored at
-`docs/superpowers/references/openapi.yaml`) for field names, patterns, and enums.
+API through [`busylib`](https://github.com/busy-app/busylib-py), the vendor's own client library, though
+`bar.py`'s own payload models (`TextElement`, `ImageElement`, `DisplayElements`) still encode field names,
+patterns, and enums learned from the bar's OpenAPI spec (vendored at `docs/superpowers/references/openapi.yaml`)
+where busylib's own schema is laxer than busyboy wants. `github.py` talks to the GitHub REST API directly over
+`requests`, unrelated to the bar.
 
 Requires Python >=3.14. Dependency management, builds, and packaging all go through `uv`.
 
@@ -53,12 +56,18 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
   single `_get` helper, which classifies every failure as fatal (`GitHubError`/`GitHubAuthError`) or retryable
   (`GitHubTransientError`) — see Exception hierarchy below. Knows nothing about the bar, Typer, or `git.py`.
 - `src/busyboy/bar.py` — `build_text_payload` and `build_workflow_payload` (both pure, no I/O), `draw_text`,
-  `clear`, `upload_icons`, the payload models (`TextElement`, `ImageElement`, `DisplayElements`), and the
-  `requests`-based transport itself. `_request` takes a `path` argument rather than a fixed endpoint, so it
-  serves `/api/display/draw` and `/api/assets/upload` alike; each call is retried up to `MAX_RETRIES` times with
-  backoff on transport-level failures, raising `busyboy.exceptions.BarAPIError` or `BarRequestError` on failure.
-  This is where all BUSY Bar knowledge lives — text and image element shape, the two-row workflow layout, asset
-  upload, and delivery.
+  `clear`, `upload_icons`, and the payload models (`TextElement`, `ImageElement`, `DisplayElements`). These
+  models are deliberately stricter than the vendored [`busylib`](https://github.com/busy-app/busylib-py)
+  client's own — the ASCII-only text pattern and the narrowed image-path pattern below are validated here,
+  before a payload ever reaches busylib, which is laxer on both. Delivery itself goes through
+  `busylib.BusyBar`: `_client` builds one per call from `config.host`/`config.token_value`, and `draw_text`,
+  `clear`, and `upload_icons` call its `display_draw`, `display_clear`, and `assets_upload` methods (passing
+  a plain `dict` via `payload.model_dump(exclude_none=True)` rather than busylib's own `types.DisplayElements`,
+  so busyboy's stricter validation is what actually ran). busylib owns retries, timeouts, and the request/
+  response shape now; `_reraise_as_bar_error` maps its `busylib.exceptions.BusyBarAPIError` onto
+  `busyboy.exceptions.BarAPIError` and everything else under `BusyBarError` onto `BarRequestError`, so the
+  rest of busyboy still only ever sees the two-branch hierarchy described below. This is where all BUSY Bar
+  knowledge lives — text and image element shape, the two-row workflow layout, asset upload, and delivery.
 - `src/busyboy/watch.py` — the poll loop: `tick` (one fetch-render-diff-draw cycle) and `watch` (the `while
   True`, Ctrl+C, and cleanup around it). The only module that imports both `bar` and `github`, because turning a
   GitHub run into bar pixels is its entire job. Knows nothing about Typer or argv — `cli.py` builds its
@@ -223,8 +232,14 @@ back in front of emoji-prefixed workflow names or reintroduce the empty-row cras
 
 ## Testing
 
-Tests drive the real `bar.py` functions against `responses`-registered endpoints rather than mocking anything
-internal to `bar.py` or `requests` itself.
+Tests drive the real `bar.py` functions against a mock HTTP transport rather than mocking anything internal to
+`bar.py` itself. `bar.py` talks to the bar through `busylib`, which uses `httpx2` rather than `requests`, so
+`responses` (which only patches `requests`) cannot intercept those calls — GitHub calls in `github.py` still go
+through `requests` and are still mocked with `responses` directly. The `bar_transport` fixture in
+`tests/conftest.py` is the shared seam: it monkeypatches `bar.busylib.BusyBar` to a factory that always injects
+an `httpx2.MockTransport`, then exposes a small `responses`-style router (`.add(method, path, ...)`, `.calls`)
+on top of it. Route registration is required — a call to an unregistered method+path raises `AssertionError`
+from the fixture rather than silently reaching the network.
 
 **No test may depend on ambient GitHub auth.** A test that reaches the real `github.resolve_token` shells out to
 `gh auth token`, so it passes on a logged-in developer's machine and fails on a CI runner that has neither a gh
@@ -235,13 +250,16 @@ change against the CI environment rather than yours, put a `gh` that exits non-z
 
 - Response bodies don't need to match any particular shape — busyboy only checks the HTTP status code, and
   discards the response body entirely on success.
-- Use **401** for failure-path tests, not 500 or a registered connection error, unless the test specifically
-  targets retry behavior — `bar.py` retries transport-level failures (connection errors, timeouts) up to
-  `MAX_RETRIES` times with a `RETRY_BACKOFF_SECONDS * (attempt + 1)` sleep between attempts, so provoking that
-  path sleeps the test unless `time.sleep` is monkeypatched (see `test_a_connection_failure_retries_then_raises`
-  in `tests/test_bar.py`). HTTP error responses are never retried, regardless of status code.
-- `tests/test_cli.py` registers a `responses` callback matching any host (`re.compile(r"^http://[^/]+/api/display/draw")`)
-  so the `--host` override test doesn't need special-casing.
+- Use **401** for failure-path tests, not 500 or a simulated transport error, unless the test specifically
+  targets retry behavior — busylib retries transport-level failures (raised from the mock transport as, e.g.,
+  `httpx2.ConnectError`) with a growing backoff sleep between attempts, so provoking that path sleeps the test
+  unless `time.sleep` is monkeypatched (see `test_a_connection_failure_retries_then_raises` in
+  `tests/test_bar.py`; patch the real `time` module, not `bar.time` — `bar.py` no longer imports `time` itself,
+  since busylib's own retry loop is the one sleeping). HTTP error responses are never retried, regardless of
+  status code.
+- `bar_transport` matches routes by method and path only, not by host — the same registration works
+  regardless of which `--host`/`BUSYBOY_HOST` value a test exercises, so the `--host` override test needs no
+  special-casing.
 - `tests/test_cli.py` drives the app with `typer.testing.CliRunner`, which takes the `typer.Typer` instance
   (`cli.main`) directly. Click 8.2+ removed `CliRunner(mix_stderr=...)`: `result.stderr` is its own stream,
   and `result.output` is **both** streams interleaved in write order — not stdout alone.
