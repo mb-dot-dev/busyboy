@@ -26,7 +26,6 @@ DisplayFontName = Literal["tiny", "small", "normal", "condensed", "bold", "large
 # cannot exist, turning a lookup that type-checks into a KeyError at runtime.
 MeasuredFontName = Literal["tiny", "small", "normal", "condensed", "bold", "large", "extra_large"]
 DEFAULT_FONT: DisplayFontName = "condensed"
-FONT_NAMES: tuple[str, ...] = get_args(DisplayFontName)
 
 DisplayName = Literal["front", "back"]
 
@@ -41,10 +40,8 @@ DEFAULT_SCROLL_RATE = 1200
 DEFAULT_TEXT_Y = 2
 
 IconName = Literal["success", "failure", "pending", "in_progress", "cancelled", "skipped"]
-# Unlike FONT_NAMES (kept as tuple[str, ...] because click.Choice wants Sequence[str]), ICON_NAMES never
-# touches Click — it's only iterated internally, so typing it tuple[IconName, ...] preserves the literal
-# type through iteration and avoids a cast at every use site. get_args() itself is untyped (tuple[Any, ...]),
-# so one cast here is unavoidable.
+# Typed tuple[IconName, ...] rather than tuple[str, ...] so the literal type survives iteration and no use
+# site needs a cast. get_args() itself is untyped (tuple[Any, ...]), so one cast here is unavoidable.
 ICON_NAMES: tuple[IconName, ...] = cast(tuple[IconName, ...], get_args(IconName))
 ASSETS_PACKAGE = "busyboy.assets"
 
