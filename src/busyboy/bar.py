@@ -305,17 +305,20 @@ def _limit_row_elements(prefix: str, track_y: int, row: LimitRow) -> list[Rectan
         )
     ]
     fill_width = min(max(round(row.percent / 100 * LIMITS_TRACK_WIDTH), 0), LIMITS_TRACK_WIDTH)
-    if fill_width > 0:
-        elements.append(
-            RectangleElement(
-                id=f"{prefix}-fill",
-                x=LIMITS_TRACK_X,
-                y=track_y,
-                width=fill_width,
-                height=LIMITS_TRACK_HEIGHT,
-                fill_colors=[LIMITS_HIGH_FILL_COLOR if high else LIMITS_FILL_COLOR],
-            )
+    # The fill is always drawn: a draw never removes omitted ids, so a bar that has reset to ~0 must overwrite
+    # its old fill rather than leave it out. An empty bar gets a 1px fill in the track colour (a rectangle
+    # cannot be 0 wide), which is invisible against the track.
+    empty = fill_width == 0
+    elements.append(
+        RectangleElement(
+            id=f"{prefix}-fill",
+            x=LIMITS_TRACK_X,
+            y=track_y,
+            width=max(fill_width, 1),
+            height=LIMITS_TRACK_HEIGHT,
+            fill_colors=[LIMITS_TRACK_COLOR if empty else LIMITS_HIGH_FILL_COLOR if high else LIMITS_FILL_COLOR],
         )
+    )
     show_countdown = row.countdown is not None and row.percent > LIMITS_COUNTDOWN_THRESHOLD
     elements.append(
         TextElement(

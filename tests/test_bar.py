@@ -363,17 +363,24 @@ def test_rectangle_serialises_for_the_wire():
 
 @pytest.mark.parametrize(
     ("percent", "width"),
-    [(0, None), (3.0, 2), (50, 35), (100, 70), (150, 70), (-5, None)],
+    [(3.0, 2), (50, 35), (100, 70), (150, 70)],
 )
 def test_fill_width_is_proportional_and_clamped(percent, width):
     _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(percent, None))
 
-    if width is None:
-        assert "session-fill" not in elements
-        assert "weekly-fill" not in elements
-    else:
-        assert elements["session-fill"].width == width
-        assert elements["weekly-fill"].width == width
+    assert elements["session-fill"].width == width
+    assert elements["weekly-fill"].width == width
+
+
+@pytest.mark.parametrize("percent", [0, 0.3, -5])
+def test_an_empty_bar_still_draws_its_fill_so_a_previous_fill_is_overwritten(percent):
+    """A draw never removes omitted ids, so a fill that reset to ~0 must be redrawn, invisibly, not left out."""
+    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(percent, None))
+
+    for prefix in ("session", "weekly"):
+        fill = elements[f"{prefix}-fill"]
+        assert fill.width == 1
+        assert fill.fill_colors == [bar.LIMITS_TRACK_COLOR + "FF"]
 
 
 @pytest.mark.parametrize(("percent", "color"), [(85, "#CD6E58FF"), (85.1, "#B3261EFF")])

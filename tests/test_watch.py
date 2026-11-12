@@ -638,3 +638,15 @@ def test_watch_limits_ends_on_a_rejected_token_after_clearing(config, bar_transp
         watch.watch_limits(config, interval=180, sleep=lambda seconds: None)
 
     assert [call.method for call in bar_transport.calls] == ["DELETE", "DELETE"]
+
+
+@responses.activate
+def test_limits_tick_does_not_redraw_when_only_invisible_values_changed(config, bar_transport, claude_token):
+    """At 10% there is no countdown and the fill width is unchanged, so a later clock must not cause a draw."""
+    responses.get(USAGE_URL, json=usage_body(session=10.0, weekly=10.0))
+    bar_transport.add("POST", DRAW_PATH)
+
+    first = watch.limits_tick(config, None, now=NOW)
+    watch.limits_tick(config, first.screen, now=NOW + timedelta(minutes=3))
+
+    assert len(draw_bodies(bar_transport)) == 1

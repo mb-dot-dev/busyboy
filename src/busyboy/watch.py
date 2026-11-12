@@ -280,6 +280,10 @@ def render_limits(usage: claude.Usage, now: datetime) -> LimitsScreen:
     )
 
 
+def _limits_payload(screen: LimitsScreen) -> bar.DisplayElements:
+    return bar.build_limits_payload(session=screen.session, weekly=screen.weekly)
+
+
 def limits_tick(
     config: BusyboyConfig,
     previous: LimitsScreen | None,
@@ -302,11 +306,15 @@ def limits_tick(
         return TickResult(screen=previous, retry_after=error.retry_after)
 
     screen = render_limits(usage, now or datetime.now(UTC))
-    if screen == previous:
-        return TickResult(screen=previous)
+    payload = _limits_payload(screen)
+    # Compare what would be drawn, not the raw screens: the screen also holds values the payload
+    # hides (a countdown at or below the threshold, sub-pixel percent changes), which differ on almost
+    # every poll without changing a single lit pixel.
+    if previous is not None and _limits_payload(previous) == payload:
+        return TickResult(screen=screen)
 
     try:
-        bar.draw_text(config, bar.build_limits_payload(session=screen.session, weekly=screen.weekly))
+        bar.draw_text(config, payload)
     except exceptions.BarError as error:
         LOGGER.debug("Draw failed, keeping the display as it is: %s", error)
         return TickResult(screen=previous)

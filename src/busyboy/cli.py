@@ -222,7 +222,8 @@ def limits(
     """Watch Claude usage limits on the bar until Ctrl+C."""
     _configure_logging(verbose=verbose)
     config = load_config(host=host, token=token)
-    # Resolved once here only so missing or expired credentials fail at startup with one line; the poll
-    # loop re-resolves the token on every tick because Claude Code refreshes its own.
-    claude.resolve_token()
+    # One real fetch up front so missing or expired credentials, an unreachable API, or an unexpected
+    # response all fail at startup with one line (the spec's startup contract). The poll loop then
+    # re-resolves the token every tick, because Claude Code refreshes its own, and tolerates transient failures.
+    claude.fetch_usage(claude.resolve_token())
     watch.watch_limits(config, interval=interval)

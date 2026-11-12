@@ -236,3 +236,33 @@ def test_malformed_credentials_json_raises_an_auth_error(monkeypatch, credential
         claude.resolve_token(now=NOW)
 
     assert SECRET not in str(info.value)
+
+
+@responses.activate
+def test_a_resets_at_without_an_offset_is_a_transient_error_not_a_type_error():
+    body = {"five_hour": {"utilization": 1.0, "resets_at": "2026-11-12T20:29:59"}, "seven_day": {"utilization": 1.0}}
+    responses.get(USAGE_URL, json=body)
+
+    with pytest.raises(exceptions.ClaudeTransientError):
+        claude.fetch_usage(SECRET)
+
+
+def test_a_keychain_timeout_with_no_file_is_transient_not_a_login_prompt(keychain, credentials_file):
+    keychain["error"] = subprocess.TimeoutExpired("security", 10)
+
+    with pytest.raises(exceptions.ClaudeTransientError):
+        claude.resolve_token(now=NOW)
+
+
+def test_a_keychain_failure_other_than_not_found_with_no_file_is_transient(keychain, credentials_file):
+    keychain["returncode"] = 1
+
+    with pytest.raises(exceptions.ClaudeTransientError):
+        claude.resolve_token(now=NOW)
+
+
+def test_a_keychain_timeout_still_falls_back_to_a_credentials_file(keychain, credentials_file):
+    keychain["error"] = subprocess.TimeoutExpired("security", 10)
+    credentials_file.write_text(credentials(token="from-file"))
+
+    assert claude.resolve_token(now=NOW) == "from-file"

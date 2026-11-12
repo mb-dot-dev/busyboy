@@ -7,13 +7,17 @@ import subprocess
 import sys
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import AwareDatetime, BaseModel, ValidationError
 import requests
 
 from busyboy import exceptions
 
 SUBPROCESS_TIMEOUT_SECONDS = 10
 KEYCHAIN_SERVICE = "Claude Code-credentials"
+# `security` exits 44 when the item does not exist; any other failure (timeout, locked keychain) says nothing
+# about whether the user is logged in.
+KEYCHAIN_NOT_FOUND_EXIT_CODE = 44
+KEYCHAIN_FAILED_MESSAGE = "Could not read the Claude Code credentials from the keychain."
 CREDENTIALS_FILE = Path("~/.claude/.credentials.json")
 
 NO_CREDENTIALS_MESSAGE = "No Claude Code credentials found. Run `claude` to log in."
@@ -32,7 +36,7 @@ class Window(BaseModel, frozen=True):
     """One usage limit: a 0-100 utilization and when the window resets (None when the API gives no reset)."""
 
     utilization: float
-    resets_at: datetime | None = None
+    resets_at: AwareDatetime | None = None
 
 
 class Usage(BaseModel, frozen=True):
@@ -42,10 +46,15 @@ class Usage(BaseModel, frozen=True):
     weekly: Window
 
 
-def _token_from_keychain() -> str | None:
-    """Read Claude Code's credentials blob from the macOS keychain, or None when it cannot be had."""
+def _token_from_keychain() -> tuple[str | None, bool]:
+    """
+    Read Claude Code's credentials blob from the macOS keychain.
+
+    Returns the blob (or None) and whether the lookup *failed* rather than simply finding nothing: a
+    timeout, a missing `security` binary, or any exit other than "not found" is a failure.
+    """
     if sys.platform != "darwin":
-        return None
+        return None, False
     try:
         result = subprocess.run(
             ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
@@ -55,12 +64,12 @@ def _token_from_keychain() -> str | None:
             check=False,
         )
     except OSError, subprocess.TimeoutExpired:
-        return None
+        return None, True
     if result.returncode != 0:
         # stderr is captured and dropped: it is a diagnostic about the keychain, and swallowing it
         # removes any chance of a credential reaching busyboy's output.
-        return None
-    return result.stdout.strip() or None
+        return None, result.returncode != KEYCHAIN_NOT_FOUND_EXIT_CODE
+    return result.stdout.strip() or None, False
 
 
 def _token_from_file() -> str | None:
@@ -94,11 +103,16 @@ def resolve_token(*, now: datetime | None = None) -> str:
     Find Claude Code's OAuth access token: the macOS keychain first, then ~/.claude/.credentials.json.
 
     Read-only: the token is never refreshed or written back. The file is consulted
-    only when the keychain entry is missing or its command fails — an entry that
+    only when the keychain entry is missing or its command fails (a failure with no file is transient) — an entry that
     exists but is expired or malformed is fatal and does not fall through.
     """
-    blob = _token_from_keychain() or _token_from_file()
+    blob, keychain_failed = _token_from_keychain()
+    blob = blob or _token_from_file()
     if blob is None:
+        if keychain_failed:
+            # Mid-watch, a keychain that is briefly unreadable (right after wake, locked) must not
+            # be reported as "log in": it is retryable.
+            raise exceptions.ClaudeTransientError(KEYCHAIN_FAILED_MESSAGE)
         raise exceptions.ClaudeAuthError(NO_CREDENTIALS_MESSAGE)
     return _access_token(blob, now or datetime.now(UTC))
 

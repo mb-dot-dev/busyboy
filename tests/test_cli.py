@@ -369,15 +369,30 @@ def test_limits_without_credentials_exits_1_with_one_line(bar_transport, monkeyp
 @responses.activate
 def test_a_token_rejected_mid_watch_exits_1_and_clears(bar_transport, monkeypatch):
     monkeypatch.setattr(cli.claude, "resolve_token", lambda: "claude-test-token")
-    responses.add(responses.GET, CLAUDE_USAGE_URL, status=401)
+    ok = {"five_hour": {"utilization": 1.0}, "seven_day": {"utilization": 1.0}}
+    responses.add(responses.GET, CLAUDE_USAGE_URL, json=ok)  # the startup fetch
+    responses.add(responses.GET, CLAUDE_USAGE_URL, json=ok)  # the first tick
+    responses.add(responses.GET, CLAUDE_USAGE_URL, status=401)  # the second tick, and every one after
     bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
     monkeypatch.setattr(cli.watch.time, "sleep", lambda seconds: None)
 
     result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
 
     assert result.exit_code == 1
     assert result.stderr.strip().startswith("Error: ")
-    assert [call.method for call in bar_transport.calls] == ["DELETE", "DELETE"]
+    assert [call.method for call in bar_transport.calls][-1] == "DELETE"
+
+
+@responses.activate
+def test_a_token_rejected_at_startup_exits_1_before_touching_the_bar(bar_transport, monkeypatch):
+    monkeypatch.setattr(cli.claude, "resolve_token", lambda: "claude-test-token")
+    responses.add(responses.GET, CLAUDE_USAGE_URL, status=401)
+
+    result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
+
+    assert result.exit_code == 1
+    assert bar_transport.calls == []
 
 
 def test_a_zero_interval_is_a_usage_error():
@@ -393,3 +408,17 @@ def test_limits_honours_the_token_override(claude_bar, monkeypatch):
     CliRunner().invoke(cli.main, ["claude", "limits", "--token", "override"], env=ENV)
 
     assert claude_bar.calls[0].headers["x-api-token"] == "override"
+
+
+@responses.activate
+def test_a_failing_first_fetch_exits_1_with_one_line(bar_transport, monkeypatch):
+    monkeypatch.setattr(cli.claude, "resolve_token", lambda: "claude-test-token")
+    responses.add(responses.GET, CLAUDE_USAGE_URL, status=503)
+    bar_transport.add("DELETE", DRAW_PATH)
+    stop_after_one_tick(monkeypatch)
+
+    result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
+
+    assert result.exit_code == 1
+    assert result.stderr.strip().startswith("Error: ")
+    assert bar_transport.calls == []

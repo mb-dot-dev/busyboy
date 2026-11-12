@@ -152,7 +152,8 @@ other bad option.
 
 `busyboy claude limits` departs from the contract the same way: it shows the 5-hour session and weekly Claude
 limits as two bars until Ctrl+C, polling every `--interval` seconds (default 180). Startup resolves the Claude
-token once so missing or expired credentials print one line and exit 1; the loop then re-resolves it each
+token and does one real usage fetch, so missing or expired credentials, an unreachable API, or an unexpected
+response print one line and exit 1; the loop then re-resolves it each
 tick, swallows `ClaudeTransientError` and `BarError` (DEBUG only), and ends on `ClaudeAuthError`. The Claude
 token comes from the keychain, then `~/.claude/.credentials.json`, and is never printed or logged.
 
@@ -337,7 +338,8 @@ Measured against a real bar by capturing frames from `/api/screen` and analysing
   27.14.0. The limits layout is two 70x7 tracks at `x=1`, `y=1` and `y=9`, each with a fill rectangle on top
   and a `tiny` countdown at `y = track_y` (its ink lands inside the track). **A draw replaces elements by id
   but never removes omitted ones**, so a countdown that should disappear is redrawn as a single space `" "`
-  (`bar.BLANK_TEXT`), verified on a real bar; leaving it out of the payload would leave the old text up.
+  (`bar.BLANK_TEXT`), verified on a real bar, and an empty bar's fill is redrawn as a 1px track-coloured
+  rectangle; leaving either out of the payload would leave the old pixels up.
 - **Redrawing an element restarts its scroll animation.** Confirmed on a real bar: when a watched workflow's
   status changed and `watch.tick` issued a redraw, the scrolling repo row jumped back to its starting position
   rather than continuing from where it was. This is why `tick` compares the freshly rendered `Screen` against
