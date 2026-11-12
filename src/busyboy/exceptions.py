@@ -42,6 +42,34 @@ class GitHubTransientError(GitHubError):
         super().__init__(message)
 
 
+class ClaudeError(BusyboyError):
+    """
+    Base class for every Claude usage-API or credential failure busyboy raises.
+
+    Like GitHubError, this is not "always fatal": ClaudeTransientError below IS
+    retryable, so catching ClaudeError alone to mean "unrecoverable" would also
+    swallow it. Catch ClaudeTransientError and ClaudeAuthError by name when the
+    retry-versus-exit distinction matters.
+    """
+
+
+class ClaudeAuthError(ClaudeError):
+    """Raised when no usable Claude Code credentials exist, the token has expired, or the API rejects it."""
+
+
+class ClaudeTransientError(ClaudeError):
+    """
+    Raised for failures worth retrying: 5xx, timeouts, dropped connections, rate limiting, and malformed bodies.
+
+    `retry_after`, when the API's Retry-After header specified a delay in
+    seconds, carries that value so the poll loop can wait at least that long.
+    """
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(message)
+
+
 class BarAPIError(BarError):
     """Raised when the BUSY Bar API returns an HTTP error response."""
 

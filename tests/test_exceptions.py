@@ -58,3 +58,30 @@ def test_github_auth_and_transient_failures_are_distinguishable():
 
 def test_a_non_bar_failure_formats_as_its_message():
     assert exceptions.format_delivery_error(exceptions.GitError("no origin remote")) == "no origin remote"
+
+
+def test_claude_auth_error_is_not_transient():
+    error = exceptions.ClaudeAuthError("expired")
+
+    assert isinstance(error, exceptions.ClaudeError)
+    assert not isinstance(error, exceptions.ClaudeTransientError)
+
+
+def test_claude_transient_error_carries_retry_after():
+    error = exceptions.ClaudeTransientError("slow down", retry_after=30)
+
+    assert isinstance(error, exceptions.ClaudeError)
+    assert error.retry_after == 30
+
+
+def test_claude_transient_error_retry_after_defaults_to_none():
+    assert exceptions.ClaudeTransientError("boom").retry_after is None
+
+
+def test_claude_errors_render_as_their_message():
+    assert exceptions.format_delivery_error(exceptions.ClaudeAuthError("expired")) == "expired"
+
+
+def test_claude_errors_are_not_github_errors():
+    assert not issubclass(exceptions.ClaudeError, exceptions.GitHubError)
+    assert issubclass(exceptions.ClaudeError, exceptions.BusyboyError)
