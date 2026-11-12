@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 busyboy is a console application (CLI) that displays information on a BUSY Bar. It talks to the bar's HTTP
 API through [`busylib`](https://github.com/busy-app/busylib-py), the vendor's own client library, though
-`bar.py`'s own payload models (`TextElement`, `ImageElement`, `DisplayElements`) still encode field names,
+`bar.py`'s own payload models (`TextElement`, `ImageElement`, `RectangleElement`, `DisplayElements`) still encode field names,
 patterns, and enums learned from the bar's OpenAPI spec (vendored at `docs/superpowers/references/openapi.yaml`)
 where busylib's own schema is laxer than busyboy wants. `github.py` talks to the GitHub REST API directly over
-`requests`, unrelated to the bar.
+`requests`, unrelated to the bar. `claude.py` does the same for Anthropic's undocumented usage endpoint.
 
 Requires Python >=3.14. Dependency management, builds, and packaging all go through `uv`.
 
@@ -33,11 +33,13 @@ commands use `--frozen` and expect the lockfile to already match.
 
 ## Architecture
 
-Seven modules (plus a packaged asset directory) with one job each. Keep the boundaries: `config.py` imports
+Eight modules (plus a packaged asset directory) with one job each. Keep the boundaries: `config.py` imports
 neither Typer nor `bar.py`; `bar.py` knows nothing about argv or the environment; `cli.py` holds no BUSY Bar
 payload knowledge; `git.py` knows nothing about GitHub, the bar, or Typer; `github.py` knows nothing about the
-bar, Typer, or `git.py`; and `watch.py` is the **only** module allowed to import both `bar` and `github` — it
-knows nothing about Typer or argv itself. `git.py` and `github.py` must never import each other. That rule is
+bar, Typer, or `git.py`; `claude.py` knows nothing about the bar, Typer, git, or GitHub; and `watch.py` is the
+**only** module allowed to import `bar` together with a data source (`github`, `claude`) — it knows nothing
+about Typer or argv itself. `git.py` and `github.py` must never import each other, and neither may
+`claude.py` and `github.py`. That rule is
 why `git.origin_repo()` returns a bare `tuple[str, str]` rather than a `github.Repo`: a `git.py` function
 returning a GitHub-typed value would create exactly the import edge the boundary forbids, so `cli.py` — which
 is allowed to know about both — does the `github.Repo(owner=owner, name=name)` construction itself.
@@ -55,7 +57,15 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
   REST queries (`resolve_workflow`, `latest_run`, `pull_request_number`) via plain `requests` calls through the
   single `_get` helper, which classifies every failure as fatal (`GitHubError`/`GitHubAuthError`) or retryable
   (`GitHubTransientError`) — see Exception hierarchy below. Knows nothing about the bar, Typer, or `git.py`.
-- `src/busyboy/bar.py` — `build_text_payload` and `build_workflow_payload` (both pure, no I/O), `draw_text`,
+- `src/busyboy/claude.py` — Claude Code credentials and usage. `resolve_token` reads the OAuth token from the
+  macOS keychain (`security find-generic-password -s "Claude Code-credentials" -w`), falling back to
+  `~/.claude/.credentials.json` only when the keychain entry is missing or the command fails — an expired or
+  malformed entry is fatal and never falls through. It is read-only: the token is never refreshed or written.
+  `fetch_usage` GETs `https://api.anthropic.com/api/oauth/usage` and returns a frozen `Usage` (`session` from
+  `five_hour`, `weekly` from `seven_day`, each a `Window` of a 0-100 `utilization` and an optional `resets_at`).
+  Failures raise `ClaudeAuthError` / `ClaudeTransientError` / `ClaudeError`; no message ever carries the token
+  or the response body. Knows nothing about the bar or Typer.
+- `src/busyboy/bar.py` — `build_text_payload`, `build_workflow_payload` and `build_limits_payload` (all pure, no I/O), `draw_text`,
   `clear`, `upload_icons`, and the payload models (`TextElement`, `ImageElement`, `DisplayElements`). These
   models are deliberately stricter than the vendored [`busylib`](https://github.com/busy-app/busylib-py)
   client's own — the ASCII-only text pattern and the narrowed image-path pattern below are validated here,
@@ -68,8 +78,10 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
   `busyboy.exceptions.BarAPIError` and everything else under `BusyBarError` onto `BarRequestError`, so the
   rest of busyboy still only ever sees the two-branch hierarchy described below. This is where all BUSY Bar
   knowledge lives — text and image element shape, the two-row workflow layout, asset upload, and delivery.
-- `src/busyboy/watch.py` — the poll loop: `tick` (one fetch-render-diff-draw cycle) and `watch` (the `while
-  True`, Ctrl+C, and cleanup around it). The only module that imports both `bar` and `github`, because turning a
+- `src/busyboy/watch.py` — the poll loops: `tick` (one fetch-render-diff-draw cycle) and `watch` (the `while
+  True`, Ctrl+C, and cleanup around it), plus the Claude equivalents `limits_tick` and `watch_limits`, both
+  built on one private `_poll` helper so the clear-first/clear-last and Retry-After behaviour live once.
+  `limits_tick` re-resolves the Claude token on every call, because Claude Code refreshes its own. The only module that imports both `bar` and `github`, because turning a
   GitHub run into bar pixels is its entire job. Knows nothing about Typer or argv — `cli.py` builds its
   `Target` and passes it in. `render` composes the bottom row as the ref (`#123` for an open pull request,
   otherwise the branch) followed by the workflow's display name, so two workflows in the same repository on
@@ -104,7 +116,9 @@ API failures), with `GitHubAuthError` and `GitHubTransientError` beneath `GitHub
 
 This split is load-bearing, not cosmetic. `watch.tick` catches `GitHubTransientError` and `BarError` and
 swallows both, leaving the display as it was: a watch process is expected to outlive a laptop sleeping or a
-wifi hiccup, so a rate limit or a dropped bar connection just means "try again next tick." `GitHubAuthError` is
+wifi hiccup, so a rate limit or a dropped bar connection just means "try again next tick." `limits_tick` splits the same way for Claude: `ClaudeError` sits directly under
+`BusyboyError` with `ClaudeAuthError` (fatal) and `ClaudeTransientError` (retryable) beneath it, and only the
+transient one and `BarError` are swallowed. `GitHubAuthError` is
 deliberately **not** caught anywhere in `tick` — it propagates out and ends the watch, because a rejected token
 never self-heals. Writing `except GitHubError:` in that path to mean "fatal, stop the watch" would also catch
 `GitHubTransientError`, its own subclass, and swallow it there instead of re-raising — the loop would then
@@ -135,6 +149,12 @@ only logged at DEBUG — visible under `--verbose`, but they never print to stde
 own. See Exception hierarchy above for why `GitHubAuthError` is the one GitHub failure that still ends the
 watch. A malformed `--repo` (anything that isn't `owner/name`) is a Typer usage error and exits 2, like any
 other bad option.
+
+`busyboy claude limits` departs from the contract the same way: it shows the 5-hour session and weekly Claude
+limits as two bars until Ctrl+C, polling every `--interval` seconds (default 180). Startup resolves the Claude
+token once so missing or expired credentials print one line and exit 1; the loop then re-resolves it each
+tick, swallows `ClaudeTransientError` and `BarError` (DEBUG only), and ends on `ClaudeAuthError`. The Claude
+token comes from the keychain, then `~/.claude/.credentials.json`, and is never printed or logged.
 
 The GitHub token comes from `gh auth token` first, then the `GITHUB_TOKEN` environment variable
 (`github.resolve_token`). Neither source's value is ever written to a log line or an error message: `gh`'s own
@@ -208,6 +228,14 @@ every test that drives the loop.
 **`ruff format` formats Python code blocks inside Markdown files.** That's why `docs` and `.superpowers` are in
 `[tool.ruff] exclude` in `pyproject.toml` — without it, `make format` would rewrite fenced code examples in the
 design docs to match ruff's own style, including ones not meant to be syntactically valid Python on their own.
+
+**The Claude usage endpoint is undocumented, and its payload is much bigger than busyboy reads.**
+`/api/oauth/usage` is what Claude Code itself calls. `utilization` is a float on a **0-100** scale (not a
+0-1 fraction), `resets_at` is ISO 8601 with a UTC offset and fractional seconds, and the response carries many
+unrelated keys (`limits`, `spend`, `extra_usage`, and a number of opaquely named null fields). `claude.Usage`
+reads only `five_hour` and `seven_day` and ignores the rest; a missing or mistyped one is a
+`ClaudeTransientError`, never a `KeyError`. Any test touching it must patch `claude.resolve_token` — a test
+that reaches the real one reads the developer's keychain.
 
 **`ImageElement.path`'s pattern is deliberately narrower than the bar's own OpenAPI contract.** The vendor spec
 allows a broader character set there (letters, digits, `.`, `_`, `/`, `-`), which would let a traversal value
@@ -305,6 +333,11 @@ Measured against a real bar by capturing frames from `/api/screen` and analysing
   legal and deliberate — it is how the top row is made to ink from display row 0. Any font `condensed`'s height
   (9 rows) or taller — `condensed`, `normal`, `bold`, `extra_large`, and `large` — cannot be stacked twice:
   9+9=18 exceeds the 16-row display, and the others are taller still.
+- **Filled rectangles need device API >= 24.3.0** (busylib's `RECTANGLE_FILL_VERSION`); confirmed working on
+  27.14.0. The limits layout is two 70x7 tracks at `x=1`, `y=1` and `y=9`, each with a fill rectangle on top
+  and a `tiny` countdown at `y = track_y` (its ink lands inside the track). **A draw replaces elements by id
+  but never removes omitted ones**, so a countdown that should disappear is redrawn as a single space `" "`
+  (`bar.BLANK_TEXT`), verified on a real bar; leaving it out of the payload would leave the old text up.
 - **Redrawing an element restarts its scroll animation.** Confirmed on a real bar: when a watched workflow's
   status changed and `watch.tick` issued a redraw, the scrolling repo row jumped back to its starting position
   rather than continuing from where it was. This is why `tick` compares the freshly rendered `Screen` against
