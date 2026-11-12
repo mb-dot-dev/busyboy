@@ -329,3 +329,111 @@ def test_a_failed_icon_upload_raises(config, bar_transport):
 )
 def test_undisplayable_characters_are_dropped_rather_than_replaced(text, expected):
     assert bar.strip_undisplayable(text) == expected
+
+
+def limits_elements(session, weekly):
+    payload = bar.build_limits_payload(session=session, weekly=weekly)
+    return payload, {element.id: element for element in payload.elements}
+
+
+def test_rectangle_element_defaults_to_no_border():
+    rectangle = bar.RectangleElement(id="r", width=5, height=5, fill_colors=["#1F1F1F"])
+
+    assert rectangle.border_width == 0
+    assert rectangle.fill == "solid"
+    assert rectangle.fill_colors == ["#1F1F1FFF"]
+
+
+def test_rectangle_element_rejects_zero_width():
+    with pytest.raises(ValidationError):
+        bar.RectangleElement(id="r", width=0, height=5, fill_colors=["#1F1F1F"])
+
+
+def test_rectangle_serialises_for_the_wire():
+    rectangle = bar.RectangleElement(id="r", x=1, y=2, width=5, height=6, fill_colors=["#CD6E58"])
+
+    body = rectangle.model_dump(exclude_none=True)
+
+    assert body["type"] == "rectangle"
+    assert body["fill"] == "solid"
+    assert body["border_width"] == 0
+    assert body["fill_colors"] == ["#CD6E58FF"]
+    assert (body["x"], body["y"], body["width"], body["height"]) == (1, 2, 5, 6)
+
+
+@pytest.mark.parametrize(
+    ("percent", "width"),
+    [(0, None), (3.0, 2), (50, 35), (100, 70), (150, 70), (-5, None)],
+)
+def test_fill_width_is_proportional_and_clamped(percent, width):
+    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(percent, None))
+
+    if width is None:
+        assert "session-fill" not in elements
+        assert "weekly-fill" not in elements
+    else:
+        assert elements["session-fill"].width == width
+        assert elements["weekly-fill"].width == width
+
+
+@pytest.mark.parametrize(("percent", "color"), [(85, "#CD6E58FF"), (85.1, "#B3261EFF")])
+def test_fill_turns_red_above_85_percent(percent, color):
+    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(10, None))
+
+    assert elements["session-fill"].fill_colors == [color]
+    assert elements["weekly-fill"].fill_colors == ["#CD6E58FF"]
+
+
+@pytest.mark.parametrize(
+    ("percent", "countdown", "shown"),
+    [(75, "3h59m", " "), (75.1, "3h59m", "3h59m"), (99, None, " "), (10, "3h59m", " ")],
+)
+def test_countdown_only_shows_above_75_percent(percent, countdown, shown):
+    _, elements = limits_elements(bar.LimitRow(percent, countdown), bar.LimitRow(0, None))
+
+    assert elements["session-reset"].text == shown
+    assert elements["session-reset"].font == "tiny"
+
+
+def test_a_hidden_countdown_is_still_drawn_so_it_overwrites_the_old_one():
+    payload, _ = limits_elements(bar.LimitRow(0, None), bar.LimitRow(0, None))
+
+    ids = [element.id for element in payload.elements]
+
+    assert "session-reset" in ids
+    assert "weekly-reset" in ids
+
+
+def test_elements_have_stable_ids_and_draw_order():
+    payload, _ = limits_elements(bar.LimitRow(90, "1h00m"), bar.LimitRow(80, "2d"))
+
+    assert [element.id for element in payload.elements] == [
+        "session-track",
+        "session-fill",
+        "session-reset",
+        "weekly-track",
+        "weekly-fill",
+        "weekly-reset",
+    ]
+
+
+def test_limits_payload_is_scoped_to_the_application():
+    payload, _ = limits_elements(bar.LimitRow(1, None), bar.LimitRow(1, None))
+
+    assert payload.application_name == bar.APPLICATION_NAME
+
+
+def test_countdown_text_color_matches_the_fill():
+    _, elements = limits_elements(bar.LimitRow(80, "1h00m"), bar.LimitRow(90, "2d"))
+
+    assert elements["session-reset"].color == "#1A1A1AFF"
+    assert elements["weekly-reset"].color == "#FFFFFFFF"
+
+
+def test_rows_are_stacked_on_the_front_display():
+    _, elements = limits_elements(bar.LimitRow(50, None), bar.LimitRow(50, None))
+
+    assert elements["session-track"].y == bar.LIMITS_SESSION_Y
+    assert elements["weekly-track"].y == bar.LIMITS_WEEKLY_Y
+    assert elements["session-track"].width == bar.LIMITS_TRACK_WIDTH
+    assert bar.LIMITS_WEEKLY_Y + bar.LIMITS_TRACK_HEIGHT <= bar.FRONT_DISPLAY_HEIGHT

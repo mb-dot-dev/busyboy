@@ -1,7 +1,8 @@
 """Construction and delivery of BUSY Bar display payloads."""
 
+import dataclasses
 from importlib import resources
-from typing import Literal, NoReturn, cast, get_args
+from typing import Annotated, Literal, NoReturn, cast, get_args
 
 import busylib
 from busylib import exceptions as busylib_exceptions
@@ -86,6 +87,28 @@ REPO_ELEMENT_ID = "repo"
 REF_ELEMENT_ID = "ref"
 ICON_ELEMENT_ID = "icon"
 
+# Two-bar limits layout on the 72x16 front display, confirmed against a real bar: a 7-row track per limit
+# (rows 1-7 and 9-15, with row 0 and row 8 left dark), the fill inside it, and a `tiny` countdown drawn over
+# both. A `tiny` glyph box sits one row below the `y` it is given (FONT_GLYPH_OFFSETS), so `y = track_y` inks
+# inside the track. Filled rectangles need device API >= 24.3.0.
+LIMITS_TRACK_X = 1
+LIMITS_TRACK_WIDTH = 70
+LIMITS_TRACK_HEIGHT = 7
+LIMITS_SESSION_Y = 1
+LIMITS_WEEKLY_Y = 9
+LIMITS_TRACK_COLOR = "#1F1F1F"
+LIMITS_FILL_COLOR = "#CD6E58"
+LIMITS_HIGH_FILL_COLOR = "#B3261E"
+LIMITS_COUNTDOWN_COLOR = "#1A1A1A"
+LIMITS_HIGH_COUNTDOWN_COLOR = "#FFFFFF"
+LIMITS_HIGH_THRESHOLD = 85
+LIMITS_COUNTDOWN_THRESHOLD = 75
+LIMITS_COUNTDOWN_X = 3
+LIMITS_COUNTDOWN_FONT: MeasuredFontName = "tiny"
+# A draw replaces elements by id but does not remove omitted ones, so a countdown that should disappear is
+# redrawn as a single space (the shortest text TextElement accepts) rather than left out of the payload.
+BLANK_TEXT = " "
+
 
 def _normalize_color(value: str | None) -> str | None:
     """Normalize a CSS name, hex, or rgb() string to #RRGGBBAA."""
@@ -133,11 +156,36 @@ class ImageElement(BaseModel):
     y: int = 0
 
 
+RgbaColor = Annotated[str, Field(pattern=r"^#[0-9A-F]{8}$")]
+
+
+class RectangleElement(BaseModel):
+    """A filled rectangle, mirroring the vendored OpenAPI schema's RectangleElement."""
+
+    id: str
+    type: Literal["rectangle"] = "rectangle"
+    display: DisplayName = "front"
+    x: int = 0
+    y: int = 0
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    radius: int = Field(default=0, ge=0)
+    fill: Literal["none", "solid", "gradient_h", "gradient_v"] = "solid"
+    fill_colors: list[RgbaColor] = Field(min_length=1, max_length=2)
+    # Deliberately 0, unlike the vendor default of 1: a bar's track and fill must not grow a white outline.
+    border_width: int = Field(default=0, ge=0)
+
+    @field_validator("fill_colors", mode="before")
+    @classmethod
+    def _validate_fill_colors(cls, value: list[str]) -> list[str | None]:
+        return [_normalize_color(color) for color in value]
+
+
 class DisplayElements(BaseModel):
     """A draw request: one application's elements for the bar to render."""
 
     application_name: str
-    elements: list[TextElement | ImageElement] = Field(min_length=1)
+    elements: list[TextElement | ImageElement | RectangleElement] = Field(min_length=1)
 
 
 def build_text_payload(
@@ -231,6 +279,71 @@ def build_workflow_payload(*, repo_label: str, ref_label: str, icon: IconName) -
             ImageElement(id=ICON_ELEMENT_ID, path=f"{icon}.png", display="front", x=ICON_X, y=ICON_Y),
             _row(REPO_ELEMENT_ID, repo_label, ROW_ONE_Y, ROW_ONE_FONT),
             _row(REF_ELEMENT_ID, ref_label, ROW_TWO_Y, ROW_TWO_FONT),
+        ],
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class LimitRow:
+    """One limit as the bar shows it: a 0-100 `percent` and its pre-formatted reset `countdown`, if any."""
+
+    percent: float
+    countdown: str | None
+
+
+def _limit_row_elements(prefix: str, track_y: int, row: LimitRow) -> list[RectangleElement | TextElement]:
+    """Build the track, fill, and countdown for one limit, in the z-order they must be drawn."""
+    high = row.percent > LIMITS_HIGH_THRESHOLD
+    elements: list[RectangleElement | TextElement] = [
+        RectangleElement(
+            id=f"{prefix}-track",
+            x=LIMITS_TRACK_X,
+            y=track_y,
+            width=LIMITS_TRACK_WIDTH,
+            height=LIMITS_TRACK_HEIGHT,
+            fill_colors=[LIMITS_TRACK_COLOR],
+        )
+    ]
+    fill_width = min(max(round(row.percent / 100 * LIMITS_TRACK_WIDTH), 0), LIMITS_TRACK_WIDTH)
+    if fill_width > 0:
+        elements.append(
+            RectangleElement(
+                id=f"{prefix}-fill",
+                x=LIMITS_TRACK_X,
+                y=track_y,
+                width=fill_width,
+                height=LIMITS_TRACK_HEIGHT,
+                fill_colors=[LIMITS_HIGH_FILL_COLOR if high else LIMITS_FILL_COLOR],
+            )
+        )
+    show_countdown = row.countdown is not None and row.percent > LIMITS_COUNTDOWN_THRESHOLD
+    elements.append(
+        TextElement(
+            id=f"{prefix}-reset",
+            text=_to_displayable_ascii(row.countdown) if show_countdown and row.countdown else BLANK_TEXT,
+            font=LIMITS_COUNTDOWN_FONT,
+            color=LIMITS_HIGH_COUNTDOWN_COLOR if high else LIMITS_COUNTDOWN_COLOR,
+            display="front",
+            x=LIMITS_COUNTDOWN_X,
+            y=track_y,
+        )
+    )
+    return elements
+
+
+def build_limits_payload(*, session: LimitRow, weekly: LimitRow) -> DisplayElements:
+    """
+    Build the two-bar limits layout: the 5-hour session bar above the weekly bar.
+
+    Ids are stable, so a redraw replaces rather than stacks. A countdown that is
+    hidden (under the threshold, or no reset time) is still included as a blank
+    so it overwrites a previously drawn one; see BLANK_TEXT.
+    """
+    return DisplayElements(
+        application_name=APPLICATION_NAME,
+        elements=[
+            *_limit_row_elements("session", LIMITS_SESSION_Y, session),
+            *_limit_row_elements("weekly", LIMITS_WEEKLY_Y, weekly),
         ],
     )
 
