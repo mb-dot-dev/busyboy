@@ -1,5 +1,7 @@
 """Tests for the workflow poll loop."""
 
+from datetime import UTC, datetime, timedelta
+import json
 import time
 
 import httpx2
@@ -7,7 +9,7 @@ import pytest
 import requests
 import responses
 
-from busyboy import bar, exceptions, github, watch
+from busyboy import bar, claude, exceptions, github, watch
 from busyboy.config import load_config
 
 REPO = github.Repo(owner="mb-dot-dev", name="busyboy")
@@ -406,3 +408,245 @@ def test_a_workflow_name_with_nothing_displayable_is_omitted_entirely():
     screen = watch.render(target, run("completed", "success"), 7)
 
     assert screen.ref_label == "#7"
+
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+NOW = datetime(2026, 11, 12, 12, 0, tzinfo=UTC)
+
+
+def usage_body(
+    session=3.0, weekly=26.0, session_resets=timedelta(hours=3, minutes=59), weekly_resets=timedelta(days=2)
+):
+    def window(utilization, resets):
+        return {"utilization": utilization, "resets_at": None if resets is None else (NOW + resets).isoformat()}
+
+    return {"five_hour": window(session, session_resets), "seven_day": window(weekly, weekly_resets)}
+
+
+@pytest.fixture
+def claude_token(monkeypatch):
+    """Stand in for Claude credentials, counting how often the token is resolved."""
+    calls = []
+
+    def resolve():
+        calls.append(1)
+        return "claude-test-token"
+
+    monkeypatch.setattr(watch.claude, "resolve_token", resolve)
+    return calls
+
+
+def draw_bodies(bar_transport):
+    return [
+        json.loads(call.content) for call in bar_transport.calls if call.method == "POST" and call.url.path == DRAW_PATH
+    ]
+
+
+@pytest.mark.parametrize(
+    ("remaining", "expected"),
+    [
+        (timedelta(hours=3, minutes=59), "3h59m"),
+        (timedelta(hours=3, minutes=5), "3h05m"),
+        (timedelta(minutes=60), "1h00m"),
+        (timedelta(minutes=59), "59m"),
+        (timedelta(0), "0m"),
+        (timedelta(minutes=-5), "0m"),
+    ],
+)
+def test_session_countdown_format(remaining, expected):
+    assert watch.format_session_countdown(remaining) == expected
+
+
+@pytest.mark.parametrize(
+    ("remaining", "expected"),
+    [
+        (timedelta(days=6, hours=3), "6d"),
+        (timedelta(hours=48), "2d"),
+        (timedelta(hours=47, minutes=59), "1d 23h"),
+        (timedelta(days=1, hours=5), "1d 5h"),
+        (timedelta(hours=24), "1d 0h"),
+        (timedelta(hours=23, minutes=59), "23h59m"),
+        (timedelta(hours=9, minutes=5), "9h05m"),
+        (timedelta(minutes=59), "59m"),
+        (timedelta(0), "0m"),
+        (timedelta(hours=-3), "0m"),
+    ],
+)
+def test_weekly_countdown_format(remaining, expected):
+    assert watch.format_weekly_countdown(remaining) == expected
+
+
+def usage(session, weekly, session_resets=timedelta(hours=1), weekly_resets=timedelta(days=3)):
+    return claude.Usage(
+        session=claude.Window(utilization=session, resets_at=None if session_resets is None else NOW + session_resets),
+        weekly=claude.Window(utilization=weekly, resets_at=None if weekly_resets is None else NOW + weekly_resets),
+    )
+
+
+def test_render_limits_carries_percent_and_countdown():
+    screen = watch.render_limits(usage(90, 80), NOW)
+
+    assert screen.session == bar.LimitRow(90, "1h00m")
+    assert screen.weekly == bar.LimitRow(80, "3d")
+
+
+def test_render_limits_with_null_resets_at_has_no_countdown():
+    screen = watch.render_limits(usage(90, 80, session_resets=None, weekly_resets=None), NOW)
+
+    assert screen.session.countdown is None
+    assert screen.weekly.countdown is None
+
+
+def test_render_limits_with_a_past_resets_at_reads_0m():
+    screen = watch.render_limits(usage(90, 80, session_resets=timedelta(hours=-1)), NOW)
+
+    assert screen.session.countdown == "0m"
+
+
+@responses.activate
+def test_limits_tick_draws_on_the_first_poll(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH)
+
+    result = watch.limits_tick(config, None, now=NOW)
+
+    assert result.screen == watch.LimitsScreen(session=bar.LimitRow(3.0, "3h59m"), weekly=bar.LimitRow(26.0, "2d"))
+    assert len(draw_bodies(bar_transport)) == 1
+
+
+@responses.activate
+def test_limits_tick_skips_the_draw_when_nothing_changed(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH)
+
+    first = watch.limits_tick(config, None, now=NOW)
+    second = watch.limits_tick(config, first.screen, now=NOW)
+
+    assert second.screen == first.screen
+    assert len(draw_bodies(bar_transport)) == 1
+
+
+@responses.activate
+def test_limits_tick_swallows_a_transient_failure_and_keeps_the_previous_screen(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, status=500)
+    previous = watch.LimitsScreen(session=bar.LimitRow(1, None), weekly=bar.LimitRow(2, None))
+
+    result = watch.limits_tick(config, previous, now=NOW)
+
+    assert result.screen == previous
+    assert bar_transport.calls == []
+
+
+@responses.activate
+def test_limits_tick_carries_retry_after(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, status=429, headers={"Retry-After": "60"})
+
+    assert watch.limits_tick(config, None, now=NOW).retry_after == 60.0
+
+
+@responses.activate
+def test_limits_tick_does_not_swallow_a_rejected_token(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, status=401)
+
+    with pytest.raises(exceptions.ClaudeAuthError):
+        watch.limits_tick(config, None, now=NOW)
+
+
+def test_limits_tick_does_not_swallow_a_missing_credential(config, bar_transport, monkeypatch):
+    def expired():
+        raise exceptions.ClaudeAuthError("expired")
+
+    monkeypatch.setattr(watch.claude, "resolve_token", expired)
+
+    with pytest.raises(exceptions.ClaudeAuthError):
+        watch.limits_tick(config, None, now=NOW)
+
+
+@responses.activate
+def test_limits_tick_swallows_a_bar_failure_and_keeps_the_previous_screen(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH, status=401)
+
+    result = watch.limits_tick(config, None, now=NOW)
+
+    assert result.screen is None
+
+
+@responses.activate
+def test_limits_tick_resolves_the_token_on_every_call(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH)
+
+    first = watch.limits_tick(config, None, now=NOW)
+    watch.limits_tick(config, first.screen, now=NOW)
+
+    assert len(claude_token) == 2
+
+
+@responses.activate
+def test_a_countdown_dropping_below_the_threshold_is_redrawn_blank(config, bar_transport, claude_token):
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body(session=90))
+    first = watch.limits_tick(config, None, now=NOW)
+    responses.replace(responses.GET, USAGE_URL, json=usage_body(session=50))
+
+    watch.limits_tick(config, first.screen, now=NOW)
+
+    before, after = draw_bodies(bar_transport)
+    texts = lambda body: {element["id"]: element["text"] for element in body["elements"] if element["type"] == "text"}
+    assert texts(before)["session-reset"] == "3h59m"
+    assert texts(after)["session-reset"] == " "
+
+
+@responses.activate
+def test_watch_limits_clears_on_start_and_on_interrupt(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    def sleep(seconds):
+        raise KeyboardInterrupt
+
+    watch.watch_limits(config, interval=180, sleep=sleep)
+
+    methods = [call.method for call in bar_transport.calls if call.url.path == DRAW_PATH]
+    assert methods == ["DELETE", "POST", "DELETE"]
+    assert not [call for call in bar_transport.calls if call.url.path == UPLOAD_PATH]
+
+
+@responses.activate
+def test_watch_limits_waits_at_least_retry_after(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    responses.get(USAGE_URL, status=429, headers={"Retry-After": "600"})
+    slept: list[float] = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        raise KeyboardInterrupt
+
+    watch.watch_limits(config, interval=180, sleep=sleep)
+
+    assert slept == [600.0]
+
+
+@responses.activate
+def test_watch_limits_ends_on_a_rejected_token_after_clearing(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    responses.get(USAGE_URL, status=401)
+
+    with pytest.raises(exceptions.ClaudeAuthError):
+        watch.watch_limits(config, interval=180, sleep=lambda seconds: None)
+
+    assert [call.method for call in bar_transport.calls] == ["DELETE", "DELETE"]
+
+
+@responses.activate
+def test_limits_tick_does_not_redraw_when_only_invisible_values_changed(config, bar_transport, claude_token):
+    """At 10% there is no countdown and the fill width is unchanged, so a later clock must not cause a draw."""
+    responses.get(USAGE_URL, json=usage_body(session=10.0, weekly=10.0))
+    bar_transport.add("POST", DRAW_PATH)
+
+    first = watch.limits_tick(config, None, now=NOW)
+    watch.limits_tick(config, first.screen, now=NOW + timedelta(minutes=3))
+
+    assert len(draw_bodies(bar_transport)) == 1

@@ -1,11 +1,12 @@
-"""The workflow poll loop: fetch, translate to a display state, draw when it changes."""
+"""The poll loops: fetch, translate to a display state, draw when it changes."""
 
 from collections.abc import Callable
 import dataclasses
+from datetime import UTC, datetime, timedelta
 import logging
 import time
 
-from busyboy import bar, exceptions, github
+from busyboy import bar, claude, exceptions, github
 from busyboy.config import BusyboyConfig
 
 LOGGER = logging.getLogger(__name__)
@@ -61,18 +62,19 @@ class Screen:
 
 
 @dataclasses.dataclass(frozen=True)
-class TickResult:
+class TickResult[ScreenT]:
     """
-    The outcome of one poll cycle.
+    The outcome of one poll cycle, generic over the kind of screen being kept up to date.
 
     `retry_after` is None on the ordinary path, meaning the caller should wait
-    the usual interval. It carries a value only when GitHub rate-limited the
-    request and told busyboy how many seconds to back off — see
-    `exceptions.GitHubTransientError.retry_after`. watch.py parses no HTTP
+    the usual interval. It carries a value only when the data source (GitHub or
+    Claude) rate-limited the request and told busyboy how many seconds to back
+    off — see `exceptions.GitHubTransientError.retry_after` and
+    `exceptions.ClaudeTransientError.retry_after`. watch.py parses no HTTP
     headers itself; it only reads this already-decoded value.
     """
 
-    screen: Screen | None
+    screen: ScreenT | None
     retry_after: float | None = None
 
 
@@ -114,7 +116,7 @@ def tick(
     token: str,
     target: Target,
     previous: Screen | None,
-) -> TickResult:
+) -> TickResult[Screen]:
     """
     Run one poll cycle, returning the state now on the bar and how long to wait before the next one.
 
@@ -182,13 +184,38 @@ def watch(
     including on a fatal error: leaving a stale workflow status on the bar
     after the process is gone would be worse than showing nothing.
     """
+    _poll(
+        config,
+        lambda previous: tick(config, token, target, previous),
+        interval=interval,
+        sleep=sleep,
+        before_loop=lambda: bar.upload_icons(config),
+    )
+
+
+def _poll[ScreenT](
+    config: BusyboyConfig,
+    step: Callable[[ScreenT | None], TickResult[ScreenT]],
+    *,
+    interval: int,
+    sleep: Callable[[float], None] | None,
+    before_loop: Callable[[], None] | None = None,
+) -> None:
+    """
+    Clear, run `before_loop`, then call `step` every interval until interrupted, clearing again on the way out.
+
+    Shared by both watches so the clear-first / clear-last guarantees, the Retry-After
+    back-off, and the Ctrl+C handling live in exactly one place. `sleep` is resolved
+    here, at call time, so tests that monkeypatch `time.sleep` still take effect.
+    """
     pause = sleep if sleep is not None else time.sleep
     bar.clear(config)
-    bar.upload_icons(config)
-    screen: Screen | None = None
+    if before_loop is not None:
+        before_loop()
+    screen: ScreenT | None = None
     try:
         while True:
-            result = tick(config, token, target, screen)
+            result = step(screen)
             screen = result.screen
             wait = interval if result.retry_after is None else max(interval, result.retry_after)
             pause(wait)
@@ -200,3 +227,111 @@ def watch(
         except exceptions.BarError as error:
             # Never let cleanup mask why the loop actually ended.
             LOGGER.debug("Could not clear the display on exit: %s", error)
+
+
+DEFAULT_LIMITS_INTERVAL_SECONDS = 180
+
+
+@dataclasses.dataclass(frozen=True)
+class LimitsScreen:
+    """Exactly what the limits bars show. Comparing two of these decides whether to redraw."""
+
+    session: bar.LimitRow
+    weekly: bar.LimitRow
+
+
+def _clock(remaining: timedelta) -> tuple[int, int]:
+    """Whole hours and minutes left, floored, never negative."""
+    minutes = max(int(remaining.total_seconds() // 60), 0)
+    return divmod(minutes, 60)
+
+
+def format_session_countdown(remaining: timedelta) -> str:
+    """Format the time to the 5-hour reset: `3h59m`, `3h05m`, or `59m`; `0m` once past."""
+    hours, minutes = _clock(remaining)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
+
+
+def format_weekly_countdown(remaining: timedelta) -> str:
+    """Format the time to the weekly reset: `6d` from 48h, `1d 5h` from 24h, else as the session form."""
+    if remaining >= timedelta(hours=48):
+        return f"{remaining.days}d"
+    if remaining >= timedelta(hours=24):
+        hours, _ = _clock(remaining)
+        return f"{hours // 24}d {hours % 24}h"
+    return format_session_countdown(remaining)
+
+
+def render_limits(usage: claude.Usage, now: datetime) -> LimitsScreen:
+    """
+    Turn fetched usage into the two bar rows.
+
+    The countdown is always computed when a reset time exists; whether it is shown is
+    `bar`'s decision (it only draws above the threshold). A missing reset time means no
+    countdown rather than an error.
+    """
+
+    def row(window: claude.Window, fmt: Callable[[timedelta], str]) -> bar.LimitRow:
+        countdown = None if window.resets_at is None else fmt(window.resets_at - now)
+        return bar.LimitRow(window.utilization, countdown)
+
+    return LimitsScreen(
+        session=row(usage.session, format_session_countdown),
+        weekly=row(usage.weekly, format_weekly_countdown),
+    )
+
+
+def _limits_payload(screen: LimitsScreen) -> bar.DisplayElements:
+    return bar.build_limits_payload(session=screen.session, weekly=screen.weekly)
+
+
+def limits_tick(
+    config: BusyboyConfig,
+    previous: LimitsScreen | None,
+    *,
+    now: datetime | None = None,
+) -> TickResult[LimitsScreen]:
+    """
+    Run one limits poll cycle, returning the state now on the bar.
+
+    The Claude token is re-resolved every call: Claude Code refreshes its own token in
+    the keychain, so a token read once at startup would go stale in a long watch.
+    Transient Claude failures and bar delivery failures leave the display untouched.
+    ClaudeAuthError (and any other ClaudeError) is deliberately not caught: a rejected
+    or expired token never self-heals, so it ends the watch.
+    """
+    try:
+        usage = claude.fetch_usage(claude.resolve_token())
+    except exceptions.ClaudeTransientError as error:
+        LOGGER.debug("Claude usage request failed, keeping the display as it is: %s", error)
+        return TickResult(screen=previous, retry_after=error.retry_after)
+
+    screen = render_limits(usage, now or datetime.now(UTC))
+    payload = _limits_payload(screen)
+    # Compare what would be drawn, not the raw screens: the screen also holds values the payload
+    # hides (a countdown at or below the threshold, sub-pixel percent changes), which differ on almost
+    # every poll without changing a single lit pixel.
+    if previous is not None and _limits_payload(previous) == payload:
+        return TickResult(screen=screen)
+
+    try:
+        bar.draw_text(config, payload)
+    except exceptions.BarError as error:
+        LOGGER.debug("Draw failed, keeping the display as it is: %s", error)
+        return TickResult(screen=previous)
+    return TickResult(screen=screen)
+
+
+def watch_limits(
+    config: BusyboyConfig,
+    *,
+    interval: int = DEFAULT_LIMITS_INTERVAL_SECONDS,
+    sleep: Callable[[float], None] | None = None,
+) -> None:
+    """
+    Poll Claude's usage limits until interrupted, then clear the display.
+
+    Like `watch`, it clears first (so nothing left by another busyboy invocation sits under
+    the bars) and clears again on any exit. There are no icons to upload.
+    """
+    _poll(config, lambda previous: limits_tick(config, previous), interval=interval, sleep=sleep)

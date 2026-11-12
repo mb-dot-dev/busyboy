@@ -9,7 +9,7 @@ from typing import Annotated, Any, NoReturn
 from pydantic import ValidationError
 import typer
 
-from busyboy import bar, exceptions, git, github, watch
+from busyboy import bar, claude, exceptions, git, github, watch
 from busyboy.config import ConfigError, load_config
 
 # Shared by every subcommand. Typer declares parameters from the signature rather than from stacked
@@ -78,6 +78,8 @@ def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
 main = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
 gh = typer.Typer(no_args_is_help=True, help="Show GitHub information on the bar.")
 main.add_typer(gh, name="gh")
+claude_app = typer.Typer(no_args_is_help=True, help="Show Claude information on the bar.")
+main.add_typer(claude_app, name="claude")
 
 
 def _show_version(value: bool) -> None:
@@ -205,3 +207,23 @@ def workflow(
         workflow=github.resolve_workflow(github_token, repo, workflow_reference),
     )
     watch.watch(config, github_token, target, interval=interval)
+
+
+@claude_app.command()
+@_handle_errors
+def limits(
+    interval: Annotated[
+        int, typer.Option(min=1, help="Seconds between polls.")
+    ] = watch.DEFAULT_LIMITS_INTERVAL_SECONDS,
+    host: HostOption = None,
+    token: TokenOption = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Watch Claude usage limits on the bar until Ctrl+C."""
+    _configure_logging(verbose=verbose)
+    config = load_config(host=host, token=token)
+    # One real fetch up front so missing or expired credentials, an unreachable API, or an unexpected
+    # response all fail at startup with one line (the spec's startup contract). The poll loop then
+    # re-resolves the token every tick, because Claude Code refreshes its own, and tolerates transient failures.
+    claude.fetch_usage(claude.resolve_token())
+    watch.watch_limits(config, interval=interval)
