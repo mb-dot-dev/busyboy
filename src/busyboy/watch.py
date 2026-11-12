@@ -67,9 +67,10 @@ class TickResult[ScreenT]:
     The outcome of one poll cycle, generic over the kind of screen being kept up to date.
 
     `retry_after` is None on the ordinary path, meaning the caller should wait
-    the usual interval. It carries a value only when GitHub rate-limited the
-    request and told busyboy how many seconds to back off — see
-    `exceptions.GitHubTransientError.retry_after`. watch.py parses no HTTP
+    the usual interval. It carries a value only when the data source (GitHub or
+    Claude) rate-limited the request and told busyboy how many seconds to back
+    off — see `exceptions.GitHubTransientError.retry_after` and
+    `exceptions.ClaudeTransientError.retry_after`. watch.py parses no HTTP
     headers itself; it only reads this already-decoded value.
     """
 

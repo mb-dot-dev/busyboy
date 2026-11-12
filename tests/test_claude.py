@@ -266,3 +266,51 @@ def test_a_keychain_timeout_still_falls_back_to_a_credentials_file(keychain, cre
     credentials_file.write_text(credentials(token="from-file"))
 
     assert claude.resolve_token(now=NOW) == "from-file"
+
+
+def test_a_non_utf8_credentials_file_is_an_auth_error_not_a_traceback(monkeypatch, credentials_file):
+    monkeypatch.setattr(claude.sys, "platform", "linux")
+    credentials_file.write_bytes(b"\xff\xfe\x00 not utf-8")
+
+    with pytest.raises(exceptions.ClaudeAuthError, match="unreadable"):
+        claude.resolve_token(now=NOW)
+
+
+@pytest.mark.parametrize("utilization", ["NaN", "Infinity", "-Infinity"])
+@responses.activate
+def test_a_non_finite_utilization_is_transient(utilization):
+    body = f'{{"five_hour": {{"utilization": {utilization}}}, "seven_day": {{"utilization": 1.0}}}}'
+    responses.get(USAGE_URL, body=body, content_type="application/json")
+
+    with pytest.raises(exceptions.ClaudeTransientError):
+        claude.fetch_usage(SECRET)
+
+
+@pytest.mark.parametrize("expires_at", ["soon", "1700000000000", [1], True])
+def test_a_non_numeric_expires_at_is_unreadable_not_unexpired(monkeypatch, credentials_file, expires_at):
+    monkeypatch.setattr(claude.sys, "platform", "linux")
+    credentials_file.write_text(credentials(expires_at=expires_at))
+
+    with pytest.raises(exceptions.ClaudeAuthError, match="unreadable"):
+        claude.resolve_token(now=NOW)
+
+
+def test_a_missing_expires_at_is_still_accepted(monkeypatch, credentials_file):
+    monkeypatch.setattr(claude.sys, "platform", "linux")
+    credentials_file.write_text(json.dumps({"claudeAiOauth": {"accessToken": "t"}}))
+
+    assert claude.resolve_token(now=NOW) == "t"
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [("999999999", claude.MAX_RETRY_AFTER_SECONDS), ("-5", 0.0), ("0", 0.0), ("90", 90.0)],
+)
+@responses.activate
+def test_retry_after_is_clamped_to_a_sane_range(header, expected):
+    responses.get(USAGE_URL, status=429, headers={"Retry-After": header})
+
+    with pytest.raises(exceptions.ClaudeTransientError) as info:
+        claude.fetch_usage(SECRET)
+
+    assert info.value.retry_after == expected

@@ -7,7 +7,7 @@ import subprocess
 import sys
 from typing import Any
 
-from pydantic import AwareDatetime, BaseModel, ValidationError
+from pydantic import AwareDatetime, BaseModel, Field, ValidationError
 import requests
 
 from busyboy import exceptions
@@ -30,12 +30,14 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 USER_AGENT = "claude-code/2.1.220"
 BETA_HEADER = "oauth-2025-04-20"
 REQUEST_TIMEOUT_SECONDS = 15
+# A server-sent Retry-After is untrusted: cap it so one absurd value cannot park the watch for days.
+MAX_RETRY_AFTER_SECONDS = 3600.0
 
 
 class Window(BaseModel, frozen=True):
     """One usage limit: a 0-100 utilization and when the window resets (None when the API gives no reset)."""
 
-    utilization: float
+    utilization: float = Field(allow_inf_nan=False)
     resets_at: AwareDatetime | None = None
 
 
@@ -78,6 +80,8 @@ def _token_from_file() -> str | None:
         return CREDENTIALS_FILE.expanduser().read_text()
     except OSError:
         return None
+    except UnicodeDecodeError:
+        raise exceptions.ClaudeAuthError(UNREADABLE_CREDENTIALS_MESSAGE) from None
 
 
 def _access_token(blob: str, now: datetime) -> str:
@@ -93,8 +97,13 @@ def _access_token(blob: str, now: datetime) -> str:
     if not isinstance(token, str) or not token:
         raise exceptions.ClaudeAuthError(UNREADABLE_CREDENTIALS_MESSAGE)
     expires_at = oauth.get("expiresAt")
-    if isinstance(expires_at, int | float) and expires_at / 1000 <= now.timestamp():
-        raise exceptions.ClaudeAuthError(EXPIRED_MESSAGE)
+    if expires_at is not None:
+        # A present-but-wrong-typed expiry says nothing about validity, so it is unreadable, not "unexpired".
+        # bool is an int subclass, so it is excluded explicitly.
+        if isinstance(expires_at, bool) or not isinstance(expires_at, int | float):
+            raise exceptions.ClaudeAuthError(UNREADABLE_CREDENTIALS_MESSAGE)
+        if expires_at / 1000 <= now.timestamp():
+            raise exceptions.ClaudeAuthError(EXPIRED_MESSAGE)
     return token
 
 
@@ -122,9 +131,10 @@ def _parse_retry_after(value: str | None) -> float | None:
     if value is None:
         return None
     try:
-        return float(int(value))
+        seconds = float(int(value))
     except ValueError:
         return None
+    return min(max(seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
 
 
 def fetch_usage(token: str) -> Usage:

@@ -81,8 +81,9 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
 - `src/busyboy/watch.py` — the poll loops: `tick` (one fetch-render-diff-draw cycle) and `watch` (the `while
   True`, Ctrl+C, and cleanup around it), plus the Claude equivalents `limits_tick` and `watch_limits`, both
   built on one private `_poll` helper so the clear-first/clear-last and Retry-After behaviour live once.
-  `limits_tick` re-resolves the Claude token on every call, because Claude Code refreshes its own. The only module that imports both `bar` and `github`, because turning a
-  GitHub run into bar pixels is its entire job. Knows nothing about Typer or argv — `cli.py` builds its
+  `limits_tick` re-resolves the Claude token on every call, because Claude Code refreshes its own. The only
+  module that imports `bar` together with a data source (`github` or `claude`), because turning fetched data
+  into bar pixels is its entire job. Knows nothing about Typer or argv — `cli.py` builds its
   `Target` and passes it in. `render` composes the bottom row as the ref (`#123` for an open pull request,
   otherwise the branch) followed by the workflow's display name, so two workflows in the same repository on
   the same branch are distinguishable on the bar.
