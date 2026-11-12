@@ -305,3 +305,91 @@ def test_a_git_failure_exits_one(monkeypatch):
 
     assert result.exit_code == 1
     assert "not a git repository" in result.stderr
+
+
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+
+
+@pytest.fixture
+def claude_bar(bar_transport, monkeypatch):
+    """Register a whole happy-path limits watch: a stand-in Claude token, the usage API, and the bar."""
+    monkeypatch.setattr(cli.claude, "resolve_token", lambda: "claude-test-token")
+    responses.add(
+        responses.GET,
+        CLAUDE_USAGE_URL,
+        json={
+            "five_hour": {"utilization": 90.0, "resets_at": "2999-01-01T00:00:00+00:00"},
+            "seven_day": {"utilization": 26.0, "resets_at": "2999-01-02T00:00:00+00:00"},
+        },
+    )
+    bar_transport.add("POST", DRAW_PATH)
+    bar_transport.add("DELETE", DRAW_PATH)
+    return bar_transport
+
+
+def test_claude_is_listed_with_its_limits_command():
+    top = CliRunner().invoke(cli.main, ["--help"])
+    sub = CliRunner().invoke(cli.main, ["claude", "--help"])
+
+    assert "claude" in top.output
+    assert "limits" in sub.output
+
+
+@responses.activate
+def test_watching_limits_draws_and_exits_cleanly(claude_bar, monkeypatch):
+    stop_after_one_tick(monkeypatch)
+
+    result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
+
+    assert result.exit_code == 0
+    assert result.output == ""
+    draws = [call for call in claude_bar.calls if call.method == "POST" and call.url.path == DRAW_PATH]
+    assert len(draws) == 1
+    elements = {element["id"]: element for element in json.loads(draws[0].content)["elements"]}
+    assert elements["session-fill"]["width"] == 63
+    assert elements["session-fill"]["fill_colors"] == ["#B3261EFF"]
+    assert elements["session-reset"]["text"] != " "
+    assert elements["weekly-reset"]["text"] == " "
+    assert [call.method for call in claude_bar.calls if call.url.path == DRAW_PATH] == ["DELETE", "POST", "DELETE"]
+
+
+def test_limits_without_credentials_exits_1_with_one_line(bar_transport, monkeypatch):
+    def no_credentials():
+        raise exceptions.ClaudeAuthError("No Claude Code credentials found. Run `claude` to log in.")
+
+    monkeypatch.setattr(cli.claude, "resolve_token", no_credentials)
+
+    result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
+
+    assert result.exit_code == 1
+    assert result.stderr.strip() == "Error: No Claude Code credentials found. Run `claude` to log in."
+    assert bar_transport.calls == []
+
+
+@responses.activate
+def test_a_token_rejected_mid_watch_exits_1_and_clears(bar_transport, monkeypatch):
+    monkeypatch.setattr(cli.claude, "resolve_token", lambda: "claude-test-token")
+    responses.add(responses.GET, CLAUDE_USAGE_URL, status=401)
+    bar_transport.add("DELETE", DRAW_PATH)
+    monkeypatch.setattr(cli.watch.time, "sleep", lambda seconds: None)
+
+    result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
+
+    assert result.exit_code == 1
+    assert result.stderr.strip().startswith("Error: ")
+    assert [call.method for call in bar_transport.calls] == ["DELETE", "DELETE"]
+
+
+def test_a_zero_interval_is_a_usage_error():
+    result = CliRunner().invoke(cli.main, ["claude", "limits", "--interval", "0"], env=ENV)
+
+    assert result.exit_code == 2
+
+
+@responses.activate
+def test_limits_honours_the_token_override(claude_bar, monkeypatch):
+    stop_after_one_tick(monkeypatch)
+
+    CliRunner().invoke(cli.main, ["claude", "limits", "--token", "override"], env=ENV)
+
+    assert claude_bar.calls[0].headers["x-api-token"] == "override"
