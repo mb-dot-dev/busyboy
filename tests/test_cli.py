@@ -346,10 +346,9 @@ def test_watching_limits_draws_and_exits_cleanly(claude_bar, monkeypatch):
     draws = [call for call in claude_bar.calls if call.method == "POST" and call.url.path == DRAW_PATH]
     assert len(draws) == 1
     elements = {element["id"]: element for element in json.loads(draws[0].content)["elements"]}
-    assert elements["session-fill"]["width"] == 63
-    assert elements["session-fill"]["fill_colors"] == ["#B3261EFF"]
-    assert elements["session-reset"]["text"] != " "
-    assert elements["weekly-reset"]["text"] == " "
+    assert elements["limit-fill"]["width"] == 63
+    assert elements["limit-fill"]["fill_colors"] == ["#B3261EFF"]
+    assert elements["limit-label"]["text"].startswith("5h 90% ")
     assert [call.method for call in claude_bar.calls if call.url.path == DRAW_PATH] == ["DELETE", "POST", "DELETE"]
 
 

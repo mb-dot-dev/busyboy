@@ -5,6 +5,7 @@ import dataclasses
 from datetime import UTC, datetime, timedelta
 import logging
 import time
+from typing import Literal
 
 from busyboy import bar, claude, exceptions, github
 from busyboy.config import BusyboyConfig
@@ -232,12 +233,20 @@ def _poll[ScreenT](
 DEFAULT_LIMITS_INTERVAL_SECONDS = 180
 
 
+type LimitKind = Literal["session", "weekly"]
+
+
 @dataclasses.dataclass(frozen=True)
 class LimitsScreen:
-    """Exactly what the limits bars show. Comparing two of these decides whether to redraw."""
+    """
+    What the limits display shows, plus the usage it came from.
 
-    session: bar.LimitRow
-    weekly: bar.LimitRow
+    `view` is what gets drawn; `usage` is kept so a Start-button press can redraw the other limit
+    without another API call.
+    """
+
+    view: bar.LimitView
+    usage: claude.Usage
 
 
 def _clock(remaining: timedelta) -> tuple[int, int]:
@@ -262,56 +271,57 @@ def format_weekly_countdown(remaining: timedelta) -> str:
     return format_session_countdown(remaining)
 
 
-def render_limits(usage: claude.Usage, now: datetime) -> LimitsScreen:
+def format_limit_label(kind: LimitKind, window: claude.Window, now: datetime) -> str:
     """
-    Turn fetched usage into the two bar rows.
+    Format the short bar label: `5h 85% 3h49m`, `wk 40% 6d`; the time is left off without a reset time.
 
-    The countdown is always computed when a reset time exists; whether it is shown is
-    `bar`'s decision (it only draws above the threshold). A missing reset time means no
-    countdown rather than an error.
+    The percent is rounded and clamped to 0-100 so the label never outgrows the display.
     """
-
-    def row(window: claude.Window, fmt: Callable[[timedelta], str]) -> bar.LimitRow:
-        countdown = None if window.resets_at is None else fmt(window.resets_at - now)
-        return bar.LimitRow(window.utilization, countdown)
-
-    return LimitsScreen(
-        session=row(usage.session, format_session_countdown),
-        weekly=row(usage.weekly, format_weekly_countdown),
-    )
+    name, fmt = ("5h", format_session_countdown) if kind == "session" else ("wk", format_weekly_countdown)
+    label = f"{name} {round(min(max(window.utilization, 0), 100))}%"
+    return label if window.resets_at is None else f"{label} {fmt(window.resets_at - now)}"
 
 
-def _limits_payload(screen: LimitsScreen) -> bar.DisplayElements:
-    return bar.build_limits_payload(session=screen.session, weekly=screen.weekly)
+def render_limits(usage: claude.Usage, now: datetime, kind: LimitKind) -> LimitsScreen:
+    """Turn fetched usage into the one limit being shown."""
+    window = usage.session if kind == "session" else usage.weekly
+    return LimitsScreen(view=bar.LimitView(format_limit_label(kind, window, now), window.utilization), usage=usage)
 
 
 def limits_tick(
     config: BusyboyConfig,
     previous: LimitsScreen | None,
     *,
+    kind: LimitKind = "session",
+    reuse_usage: bool = False,
     now: datetime | None = None,
 ) -> TickResult[LimitsScreen]:
     """
-    Run one limits poll cycle, returning the state now on the bar.
+    Run one limits poll cycle for the selected limit, returning the state now on the bar.
 
-    The Claude token is re-resolved every call: Claude Code refreshes its own token in
-    the keychain, so a token read once at startup would go stale in a long watch.
-    Transient Claude failures and bar delivery failures leave the display untouched.
-    ClaudeAuthError (and any other ClaudeError) is deliberately not caught: a rejected
-    or expired token never self-heals, so it ends the watch.
+    With `reuse_usage` and a previous screen, the usage that screen carries is rendered again instead of
+    fetching: that is how a Start-button press redraws immediately. Without a previous screen there is
+    nothing to reuse, so it fetches regardless.
+
+    The Claude token is re-resolved on every fetch: Claude Code refreshes its own token in the keychain,
+    so a token read once at startup would go stale in a long watch. Transient Claude failures and bar
+    delivery failures leave the display untouched. ClaudeAuthError (and any other ClaudeError) is
+    deliberately not caught: a rejected or expired token never self-heals, so it ends the watch.
     """
-    try:
-        usage = claude.fetch_usage(claude.resolve_token())
-    except exceptions.ClaudeTransientError as error:
-        LOGGER.debug("Claude usage request failed, keeping the display as it is: %s", error)
-        return TickResult(screen=previous, retry_after=error.retry_after)
+    if reuse_usage and previous is not None:
+        usage = previous.usage
+    else:
+        try:
+            usage = claude.fetch_usage(claude.resolve_token())
+        except exceptions.ClaudeTransientError as error:
+            LOGGER.debug("Claude usage request failed, keeping the display as it is: %s", error)
+            return TickResult(screen=previous, retry_after=error.retry_after)
 
-    screen = render_limits(usage, now or datetime.now(UTC))
-    payload = _limits_payload(screen)
-    # Compare what would be drawn, not the raw screens: the screen also holds values the payload
-    # hides (a countdown at or below the threshold, sub-pixel percent changes), which differ on almost
-    # every poll without changing a single lit pixel.
-    if previous is not None and _limits_payload(previous) == payload:
+    screen = render_limits(usage, now or datetime.now(UTC), kind)
+    payload = bar.build_limits_payload(screen.view)
+    # Compare what would be drawn, not the raw screens: the usage and the unrounded percent differ on almost
+    # every poll without changing a single lit pixel or character.
+    if previous is not None and bar.build_limits_payload(previous.view) == payload:
         return TickResult(screen=screen)
 
     try:

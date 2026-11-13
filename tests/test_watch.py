@@ -483,35 +483,77 @@ def usage(session, weekly, session_resets=timedelta(hours=1), weekly_resets=time
     )
 
 
-def test_render_limits_carries_percent_and_countdown():
-    screen = watch.render_limits(usage(90, 80), NOW)
+@pytest.mark.parametrize(
+    ("kind", "utilization", "remaining", "expected"),
+    [
+        ("session", 85.0, timedelta(hours=3, minutes=49), "5h 85% 3h49m"),
+        ("weekly", 40.0, timedelta(days=6, hours=2), "wk 40% 6d"),
+        ("weekly", 40.0, timedelta(hours=29), "wk 40% 1d 5h"),
+        ("session", 99.6, timedelta(hours=1), "5h 100% 1h00m"),
+        ("session", 150.0, timedelta(hours=1), "5h 100% 1h00m"),
+        ("session", -3.0, timedelta(hours=1), "5h 0% 1h00m"),
+        ("session", 0.4, timedelta(hours=1), "5h 0% 1h00m"),
+        ("session", 85.0, None, "5h 85%"),
+        ("session", 85.0, timedelta(hours=-1), "5h 85% 0m"),
+    ],
+)
+def test_format_limit_label(kind, utilization, remaining, expected):
+    window = claude.Window(utilization=utilization, resets_at=None if remaining is None else NOW + remaining)
 
-    assert screen.session == bar.LimitRow(90, "1h00m")
-    assert screen.weekly == bar.LimitRow(80, "3d")
+    assert watch.format_limit_label(kind, window, NOW) == expected
 
 
-def test_render_limits_with_null_resets_at_has_no_countdown():
-    screen = watch.render_limits(usage(90, 80, session_resets=None, weekly_resets=None), NOW)
+def test_render_limits_picks_the_requested_window():
+    session = watch.render_limits(usage(90, 40), NOW, "session")
+    weekly = watch.render_limits(usage(90, 40), NOW, "weekly")
 
-    assert screen.session.countdown is None
-    assert screen.weekly.countdown is None
+    assert session.view == bar.LimitView("5h 90% 1h00m", 90)
+    assert weekly.view == bar.LimitView("wk 40% 3d", 40)
+    assert weekly.usage == usage(90, 40)
 
 
-def test_render_limits_with_a_past_resets_at_reads_0m():
-    screen = watch.render_limits(usage(90, 80, session_resets=timedelta(hours=-1)), NOW)
-
-    assert screen.session.countdown == "0m"
+def label_of(body):
+    return next(element["text"] for element in body["elements"] if element["id"] == "limit-label")
 
 
 @responses.activate
-def test_limits_tick_draws_on_the_first_poll(config, bar_transport, claude_token):
+@pytest.mark.parametrize(("kind", "prefix"), [("session", "5h 3%"), ("weekly", "wk 26%")])
+def test_limits_tick_draws_the_selected_kind_on_the_first_poll(config, bar_transport, claude_token, kind, prefix):
     responses.get(USAGE_URL, json=usage_body())
     bar_transport.add("POST", DRAW_PATH)
 
-    result = watch.limits_tick(config, None, now=NOW)
+    result = watch.limits_tick(config, None, kind=kind, now=NOW)
 
-    assert result.screen == watch.LimitsScreen(session=bar.LimitRow(3.0, "3h59m"), weekly=bar.LimitRow(26.0, "2d"))
-    assert len(draw_bodies(bar_transport)) == 1
+    assert result.screen is not None
+    assert result.screen.view.label.startswith(prefix)
+    [body] = draw_bodies(bar_transport)
+    assert label_of(body).startswith(prefix)
+
+
+@responses.activate
+def test_limits_tick_reuse_usage_does_not_fetch(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH)
+    first = watch.limits_tick(config, None, now=NOW)
+
+    second = watch.limits_tick(config, first.screen, kind="weekly", reuse_usage=True, now=NOW)
+
+    assert len(responses.calls) == 1
+    assert len(claude_token) == 1
+    assert second.screen is not None
+    assert second.screen.view.label.startswith("wk ")
+    assert len(draw_bodies(bar_transport)) == 2
+
+
+@responses.activate
+def test_limits_tick_reuse_usage_without_a_previous_screen_fetches(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH)
+
+    result = watch.limits_tick(config, None, kind="weekly", reuse_usage=True, now=NOW)
+
+    assert len(responses.calls) == 1
+    assert result.screen is not None
 
 
 @responses.activate
@@ -529,7 +571,7 @@ def test_limits_tick_skips_the_draw_when_nothing_changed(config, bar_transport, 
 @responses.activate
 def test_limits_tick_swallows_a_transient_failure_and_keeps_the_previous_screen(config, bar_transport, claude_token):
     responses.get(USAGE_URL, status=500)
-    previous = watch.LimitsScreen(session=bar.LimitRow(1, None), weekly=bar.LimitRow(2, None))
+    previous = watch.LimitsScreen(view=bar.LimitView("5h 1%", 1), usage=usage(1, 2))
 
     result = watch.limits_tick(config, previous, now=NOW)
 
@@ -584,21 +626,6 @@ def test_limits_tick_resolves_the_token_on_every_call(config, bar_transport, cla
 
 
 @responses.activate
-def test_a_countdown_dropping_below_the_threshold_is_redrawn_blank(config, bar_transport, claude_token):
-    bar_transport.add("POST", DRAW_PATH)
-    responses.get(USAGE_URL, json=usage_body(session=90))
-    first = watch.limits_tick(config, None, now=NOW)
-    responses.replace(responses.GET, USAGE_URL, json=usage_body(session=50))
-
-    watch.limits_tick(config, first.screen, now=NOW)
-
-    before, after = draw_bodies(bar_transport)
-    texts = lambda body: {element["id"]: element["text"] for element in body["elements"] if element["type"] == "text"}
-    assert texts(before)["session-reset"] == "3h59m"
-    assert texts(after)["session-reset"] == " "
-
-
-@responses.activate
 def test_watch_limits_clears_on_start_and_on_interrupt(config, bar_transport, claude_token):
     bar_transport.add("DELETE", DRAW_PATH)
     bar_transport.add("POST", DRAW_PATH)
@@ -642,11 +669,12 @@ def test_watch_limits_ends_on_a_rejected_token_after_clearing(config, bar_transp
 
 @responses.activate
 def test_limits_tick_does_not_redraw_when_only_invisible_values_changed(config, bar_transport, claude_token):
-    """At 10% there is no countdown and the fill width is unchanged, so a later clock must not cause a draw."""
-    responses.get(USAGE_URL, json=usage_body(session=10.0, weekly=10.0))
+    """Sub-integer percent drift and seconds inside the same minute change no lit pixel and no character."""
+    responses.get(USAGE_URL, json=usage_body(session=10.0))
     bar_transport.add("POST", DRAW_PATH)
+    first = watch.limits_tick(config, None, now=NOW - timedelta(seconds=30))
+    responses.replace(responses.GET, USAGE_URL, json=usage_body(session=10.2))
 
-    first = watch.limits_tick(config, None, now=NOW)
-    watch.limits_tick(config, first.screen, now=NOW + timedelta(minutes=3))
+    watch.limits_tick(config, first.screen, now=NOW)
 
     assert len(draw_bodies(bar_transport)) == 1

@@ -331,8 +331,8 @@ def test_undisplayable_characters_are_dropped_rather_than_replaced(text, expecte
     assert bar.strip_undisplayable(text) == expected
 
 
-def limits_elements(session, weekly):
-    payload = bar.build_limits_payload(session=session, weekly=weekly)
+def limits_elements(view):
+    payload = bar.build_limits_payload(view)
     return payload, {element.id: element for element in payload.elements}
 
 
@@ -366,81 +366,53 @@ def test_rectangle_serialises_for_the_wire():
     [(3.0, 2), (50, 35), (100, 70), (150, 70)],
 )
 def test_fill_width_is_proportional_and_clamped(percent, width):
-    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(percent, None))
+    _, elements = limits_elements(bar.LimitView("5h", percent))
 
-    assert elements["session-fill"].width == width
-    assert elements["weekly-fill"].width == width
+    assert elements["limit-fill"].width == width
 
 
 @pytest.mark.parametrize("percent", [0, 0.3, -5])
 def test_an_empty_bar_still_draws_its_fill_so_a_previous_fill_is_overwritten(percent):
     """A draw never removes omitted ids, so a fill that reset to ~0 must be redrawn, invisibly, not left out."""
-    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(percent, None))
+    _, elements = limits_elements(bar.LimitView("5h", percent))
 
-    for prefix in ("session", "weekly"):
-        fill = elements[f"{prefix}-fill"]
-        assert fill.width == 1
-        assert fill.fill_colors == [bar.LIMITS_TRACK_COLOR + "FF"]
+    fill = elements["limit-fill"]
+    assert fill.width == 1
+    assert fill.fill_colors == [bar.LIMITS_TRACK_COLOR + "FF"]
 
 
 @pytest.mark.parametrize(("percent", "color"), [(85, "#CD6E58FF"), (85.1, "#B3261EFF")])
 def test_fill_turns_red_above_85_percent(percent, color):
-    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(10, None))
+    _, elements = limits_elements(bar.LimitView("5h", percent))
 
-    assert elements["session-fill"].fill_colors == [color]
-    assert elements["weekly-fill"].fill_colors == ["#CD6E58FF"]
-
-
-@pytest.mark.parametrize(
-    ("percent", "countdown", "shown"),
-    [(75, "3h59m", " "), (75.1, "3h59m", "3h59m"), (99, None, " "), (10, "3h59m", " ")],
-)
-def test_countdown_only_shows_above_75_percent(percent, countdown, shown):
-    _, elements = limits_elements(bar.LimitRow(percent, countdown), bar.LimitRow(0, None))
-
-    assert elements["session-reset"].text == shown
-    assert elements["session-reset"].font == "tiny"
+    assert elements["limit-fill"].fill_colors == [color]
 
 
-def test_a_hidden_countdown_is_still_drawn_so_it_overwrites_the_old_one():
-    payload, _ = limits_elements(bar.LimitRow(0, None), bar.LimitRow(0, None))
+def test_payload_is_track_fill_label_in_draw_order():
+    payload, _ = limits_elements(bar.LimitView("5h 90% 1h00m", 90))
 
-    ids = [element.id for element in payload.elements]
-
-    assert "session-reset" in ids
-    assert "weekly-reset" in ids
+    assert [element.id for element in payload.elements] == ["limit-track", "limit-fill", "limit-label"]
 
 
-def test_elements_have_stable_ids_and_draw_order():
-    payload, _ = limits_elements(bar.LimitRow(90, "1h00m"), bar.LimitRow(80, "2d"))
+def test_bar_is_on_the_bottom_rows():
+    _, elements = limits_elements(bar.LimitView("5h", 50))
 
-    assert [element.id for element in payload.elements] == [
-        "session-track",
-        "session-fill",
-        "session-reset",
-        "weekly-track",
-        "weekly-fill",
-        "weekly-reset",
-    ]
+    assert elements["limit-track"].y == bar.LIMITS_BAR_Y
+    assert bar.LIMITS_BAR_Y + bar.LIMITS_TRACK_HEIGHT <= bar.FRONT_DISPLAY_HEIGHT
+    assert elements["limit-track"].width == bar.LIMITS_TRACK_WIDTH
 
 
-def test_limits_payload_is_scoped_to_the_application():
-    payload, _ = limits_elements(bar.LimitRow(1, None), bar.LimitRow(1, None))
+def test_label_text_font_and_position():
+    _, elements = limits_elements(bar.LimitView("5h 85% 3h49m", 85))
+
+    label = elements["limit-label"]
+    assert label.text == "5h 85% 3h49m"
+    assert label.font == "small"
+    assert (label.x, label.y) == (bar.LIMITS_LABEL_X, bar.LIMITS_LABEL_Y)
+    assert label.color == "#E6E6E6FF"
+
+
+def test_payload_is_scoped_to_the_application():
+    payload, _ = limits_elements(bar.LimitView("5h", 1))
 
     assert payload.application_name == bar.APPLICATION_NAME
-
-
-def test_countdown_text_color_matches_the_fill():
-    _, elements = limits_elements(bar.LimitRow(80, "1h00m"), bar.LimitRow(90, "2d"))
-
-    assert elements["session-reset"].color == "#1A1A1AFF"
-    assert elements["weekly-reset"].color == "#FFFFFFFF"
-
-
-def test_rows_are_stacked_on_the_front_display():
-    _, elements = limits_elements(bar.LimitRow(50, None), bar.LimitRow(50, None))
-
-    assert elements["session-track"].y == bar.LIMITS_SESSION_Y
-    assert elements["weekly-track"].y == bar.LIMITS_WEEKLY_Y
-    assert elements["session-track"].width == bar.LIMITS_TRACK_WIDTH
-    assert bar.LIMITS_WEEKLY_Y + bar.LIMITS_TRACK_HEIGHT <= bar.FRONT_DISPLAY_HEIGHT
