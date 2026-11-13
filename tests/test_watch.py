@@ -1,6 +1,7 @@
 """Tests for the workflow poll loop."""
 
 from datetime import UTC, datetime, timedelta
+import itertools
 import json
 import time
 
@@ -676,5 +677,157 @@ def test_limits_tick_does_not_redraw_when_only_invisible_values_changed(config, 
     responses.replace(responses.GET, USAGE_URL, json=usage_body(session=10.2))
 
     watch.limits_tick(config, first.screen, now=NOW)
+
+    assert len(draw_bodies(bar_transport)) == 1
+
+
+class FakeListener:
+    """Stands in for bar.StartButtonListener: scripted `wait_for_press` results, then Ctrl+C."""
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def wait_for_press(self, timeout):
+        if not self.results:
+            raise KeyboardInterrupt
+        return self.results.pop(0)
+
+
+def labels_drawn(bar_transport):
+    return [label_of(body) for body in draw_bodies(bar_transport)]
+
+
+def clock(monkeypatch, *readings):
+    """Script `time.monotonic` for the watch: the given readings, then the last one forever."""
+    values = itertools.chain(readings, itertools.repeat(readings[-1]))
+    monkeypatch.setattr(watch.time, "monotonic", lambda: next(values))
+
+
+@responses.activate
+def test_a_press_switches_to_weekly_and_redraws_without_fetching(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True))
+
+    assert len(responses.calls) == 1
+    labels = labels_drawn(bar_transport)
+    assert [label.split()[0] for label in labels] == ["5h", "wk"]
+
+
+@responses.activate
+def test_a_second_press_returns_to_the_five_hour_view(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True, True))
+
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk", "5h"]
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_a_press_after_the_interval_has_elapsed_fetches_again(config, bar_transport, claude_token, monkeypatch):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+    clock(monkeypatch, 0, 1000)
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True))
+
+    assert len(responses.calls) == 2
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk"]
+
+
+@responses.activate
+def test_a_timeout_poll_with_unchanged_data_does_not_redraw(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(False))
+
+    assert len(responses.calls) == 2
+    assert len(draw_bodies(bar_transport)) == 1
+
+
+@responses.activate
+def test_a_press_after_a_transient_failure_keeps_the_display_and_does_not_raise(
+    config, bar_transport, claude_token, monkeypatch
+):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+    responses.get(USAGE_URL, status=500)
+    clock(monkeypatch, 0, 1000)
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True))
+
+    assert len(draw_bodies(bar_transport)) == 1
+    assert bar_transport.calls[-1].method == "DELETE"
+
+
+@responses.activate
+def test_a_press_before_the_first_successful_fetch_fetches(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, status=500)
+    responses.get(USAGE_URL, json=usage_body())
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True))
+
+    assert len(responses.calls) == 2
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["wk"]
+
+
+@responses.activate
+def test_the_listener_is_started_and_stopped_even_on_interrupt(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+    listener = FakeListener()
+
+    watch.watch_limits(config, interval=180, listener=listener)
+
+    assert listener.started
+    assert listener.stopped
+
+
+@responses.activate
+def test_the_listener_is_stopped_when_a_rejected_token_ends_the_watch(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    responses.get(USAGE_URL, status=401)
+    listener = FakeListener()
+
+    with pytest.raises(exceptions.ClaudeAuthError):
+        watch.watch_limits(config, interval=180, listener=listener)
+
+    assert listener.stopped
+
+
+@responses.activate
+def test_an_injected_sleep_runs_without_creating_a_listener(config, bar_transport, claude_token, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a listener must not be created when sleep is injected")
+
+    monkeypatch.setattr(watch.bar, "StartButtonListener", forbidden)
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    def sleep(seconds):
+        raise KeyboardInterrupt
+
+    watch.watch_limits(config, interval=180, sleep=sleep)
 
     assert len(draw_bodies(bar_transport)) == 1

@@ -219,7 +219,7 @@ def limits(
     token: TokenOption = None,
     verbose: VerboseOption = False,
 ) -> None:
-    """Watch Claude usage limits on the bar until Ctrl+C."""
+    """Watch Claude usage limits on the bar until Ctrl+C; the Start button switches between 5-hour and weekly."""
     _configure_logging(verbose=verbose)
     config = load_config(host=host, token=token)
     # One real fetch up front so missing or expired credentials, an unreachable API, or an unexpected

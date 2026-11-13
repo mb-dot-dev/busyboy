@@ -337,11 +337,50 @@ def watch_limits(
     *,
     interval: int = DEFAULT_LIMITS_INTERVAL_SECONDS,
     sleep: Callable[[float], None] | None = None,
+    listener: bar.ButtonListener | None = None,
 ) -> None:
     """
     Poll Claude's usage limits until interrupted, then clear the display.
 
-    Like `watch`, it clears first (so nothing left by another busyboy invocation sits under
-    the bars) and clears again on any exit. There are no icons to upload.
+    One limit is shown at a time, the 5-hour one first; each Start-button press on the bar switches to the
+    other and redraws at once from the usage already fetched, without a new API call. A fetch still happens
+    when `interval` seconds have passed since the last one, so presses cannot hold off fresh data.
+
+    Like `watch`, it clears first (so nothing left by another busyboy invocation sits under the display)
+    and clears again on any exit. There are no icons to upload.
+
+    `sleep`, when given, replaces the wait entirely (tests drive the loop with it) and no button listener is
+    created, so a press can never happen. Otherwise the wait is the listener's `wait_for_press`, which wakes
+    early on a press. `listener` is resolved here so tests can inject a fake.
     """
-    _poll(config, lambda previous: limits_tick(config, previous), interval=interval, sleep=sleep)
+    active = None if sleep is not None else listener if listener is not None else bar.StartButtonListener(config)
+    kind: LimitKind = "session"
+    pressed = False
+    last_fetch = 0.0
+
+    def pause(seconds: float) -> None:
+        nonlocal kind, pressed
+        if active is None:
+            assert sleep is not None  # narrows the type: `active` is None only when `sleep` is given
+            sleep(seconds)
+            pressed = False
+            return
+        pressed = active.wait_for_press(seconds)
+        if pressed:
+            kind = "weekly" if kind == "session" else "session"
+
+    def step(previous: LimitsScreen | None) -> TickResult[LimitsScreen]:
+        nonlocal last_fetch
+        reuse = pressed and previous is not None and time.monotonic() - last_fetch < interval
+        result = limits_tick(config, previous, kind=kind, reuse_usage=reuse)
+        if not reuse:
+            last_fetch = time.monotonic()
+        return result
+
+    if active is not None:
+        active.start()
+    try:
+        _poll(config, step, interval=interval, sleep=pause)
+    finally:
+        if active is not None:
+            active.stop()

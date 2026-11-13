@@ -6,7 +6,7 @@ import dataclasses
 from importlib import resources
 import logging
 import threading
-from typing import Annotated, Literal, NoReturn, Self, cast, get_args
+from typing import Annotated, Literal, NoReturn, Protocol, Self, cast, get_args
 
 import busylib
 from busylib import exceptions as busylib_exceptions
@@ -439,6 +439,16 @@ async def _status_stream(config: BusyboyConfig) -> AsyncIterator[object]:
             yield message
     finally:
         await client.aclose()
+
+
+class ButtonListener(Protocol):
+    """What the poll loop needs from a button listener; `StartButtonListener` is the real one."""
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def wait_for_press(self, timeout: float) -> bool: ...
 
 
 class StartButtonListener:

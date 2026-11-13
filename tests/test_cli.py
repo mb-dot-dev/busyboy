@@ -310,9 +310,33 @@ def test_a_git_failure_exits_one(monkeypatch):
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 
+class EndsAtTheFirstWait:
+    """A button listener that never connects and ends the watch at its first wait, the way Ctrl+C would."""
+
+    def __init__(self, config):
+        pass
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def wait_for_press(self, timeout):
+        raise KeyboardInterrupt
+
+
+class NeverPressed(EndsAtTheFirstWait):
+    """A button listener whose waits time out at once, so the poll loop keeps ticking without sleeping."""
+
+    def wait_for_press(self, timeout):
+        return False
+
+
 @pytest.fixture
 def claude_bar(bar_transport, monkeypatch):
-    """Register a whole happy-path limits watch: a stand-in Claude token, the usage API, and the bar."""
+    """Register a whole happy-path limits watch: a stand-in Claude token, the usage API, the bar, no real buttons."""
+    monkeypatch.setattr(cli.watch.bar, "StartButtonListener", EndsAtTheFirstWait)
     monkeypatch.setattr(cli.claude, "resolve_token", lambda: "claude-test-token")
     responses.add(
         responses.GET,
@@ -336,9 +360,7 @@ def test_claude_is_listed_with_its_limits_command():
 
 
 @responses.activate
-def test_watching_limits_draws_and_exits_cleanly(claude_bar, monkeypatch):
-    stop_after_one_tick(monkeypatch)
-
+def test_watching_limits_draws_and_exits_cleanly(claude_bar):
     result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
 
     assert result.exit_code == 0
@@ -374,7 +396,7 @@ def test_a_token_rejected_mid_watch_exits_1_and_clears(bar_transport, monkeypatc
     responses.add(responses.GET, CLAUDE_USAGE_URL, status=401)  # the second tick, and every one after
     bar_transport.add("DELETE", DRAW_PATH)
     bar_transport.add("POST", DRAW_PATH)
-    monkeypatch.setattr(cli.watch.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(cli.watch.bar, "StartButtonListener", NeverPressed)
 
     result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
 
@@ -401,9 +423,7 @@ def test_a_zero_interval_is_a_usage_error():
 
 
 @responses.activate
-def test_limits_honours_the_token_override(claude_bar, monkeypatch):
-    stop_after_one_tick(monkeypatch)
-
+def test_limits_honours_the_token_override(claude_bar):
     CliRunner().invoke(cli.main, ["claude", "limits", "--token", "override"], env=ENV)
 
     assert claude_bar.calls[0].headers["x-api-token"] == "override"
