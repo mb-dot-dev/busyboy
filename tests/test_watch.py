@@ -483,35 +483,84 @@ def usage(session, weekly, session_resets=timedelta(hours=1), weekly_resets=time
     )
 
 
-def test_render_limits_carries_percent_and_countdown():
-    screen = watch.render_limits(usage(90, 80), NOW)
+@pytest.mark.parametrize(
+    ("kind", "utilization", "remaining", "expected"),
+    [
+        ("session", 85.0, timedelta(hours=3, minutes=49), "5h 85% 3h49m"),
+        ("weekly", 40.0, timedelta(days=6, hours=2), "wk 40% 6d"),
+        ("weekly", 40.0, timedelta(hours=29), "wk 40% 29h"),
+        ("weekly", 100.0, timedelta(hours=47, minutes=59), "wk 100% 47h"),
+        ("weekly", 40.0, timedelta(hours=48), "wk 40% 2d"),
+        ("session", 99.6, timedelta(hours=1), "5h 100% 1h00m"),
+        ("session", 150.0, timedelta(hours=1), "5h 100% 1h00m"),
+        ("session", -3.0, timedelta(hours=1), "5h 0% 1h00m"),
+        ("session", 0.4, timedelta(hours=1), "5h 0% 1h00m"),
+        ("session", 85.0, None, "5h 85%"),
+        ("session", 85.0, timedelta(hours=-1), "5h 85% 0m"),
+        # Under two days the weekly label is whole hours: `wk 100% 1d 23h` and `wk 100% 23h59m` are wider than the display.
+        ("weekly", 100.0, timedelta(hours=23, minutes=59), "wk 100% 23h"),
+        ("weekly", 40.0, timedelta(hours=5, minutes=5), "wk 40% 5h"),
+        ("weekly", 40.0, timedelta(minutes=59), "wk 40% 59m"),
+        ("weekly", 40.0, timedelta(hours=-1), "wk 40% 0m"),
+    ],
+)
+def test_format_limit_label(kind, utilization, remaining, expected):
+    window = claude.Window(utilization=utilization, resets_at=None if remaining is None else NOW + remaining)
 
-    assert screen.session == bar.LimitRow(90, "1h00m")
-    assert screen.weekly == bar.LimitRow(80, "3d")
+    assert watch.format_limit_label(kind, window, NOW) == expected
 
 
-def test_render_limits_with_null_resets_at_has_no_countdown():
-    screen = watch.render_limits(usage(90, 80, session_resets=None, weekly_resets=None), NOW)
+def test_render_limits_picks_the_requested_window():
+    session = watch.render_limits(usage(90, 40), NOW, "session")
+    weekly = watch.render_limits(usage(90, 40), NOW, "weekly")
 
-    assert screen.session.countdown is None
-    assert screen.weekly.countdown is None
+    assert session.view == bar.LimitView("5h 90% 1h00m", 90)
+    assert weekly.view == bar.LimitView("wk 40% 3d", 40)
+    assert weekly.usage == usage(90, 40)
 
 
-def test_render_limits_with_a_past_resets_at_reads_0m():
-    screen = watch.render_limits(usage(90, 80, session_resets=timedelta(hours=-1)), NOW)
-
-    assert screen.session.countdown == "0m"
+def label_of(body):
+    return next(element["text"] for element in body["elements"] if element["id"] == "limit-label")
 
 
 @responses.activate
-def test_limits_tick_draws_on_the_first_poll(config, bar_transport, claude_token):
+@pytest.mark.parametrize(("kind", "prefix"), [("session", "5h 3%"), ("weekly", "wk 26%")])
+def test_limits_tick_draws_the_selected_kind_on_the_first_poll(config, bar_transport, claude_token, kind, prefix):
     responses.get(USAGE_URL, json=usage_body())
     bar_transport.add("POST", DRAW_PATH)
 
-    result = watch.limits_tick(config, None, now=NOW)
+    result = watch.limits_tick(config, None, kind=kind, now=NOW)
 
-    assert result.screen == watch.LimitsScreen(session=bar.LimitRow(3.0, "3h59m"), weekly=bar.LimitRow(26.0, "2d"))
-    assert len(draw_bodies(bar_transport)) == 1
+    assert result.screen is not None
+    assert result.screen.view.label.startswith(prefix)
+    [body] = draw_bodies(bar_transport)
+    assert label_of(body).startswith(prefix)
+
+
+@responses.activate
+def test_limits_tick_reuse_usage_does_not_fetch(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH)
+    first = watch.limits_tick(config, None, now=NOW)
+
+    second = watch.limits_tick(config, first.screen, kind="weekly", reuse_usage=True, now=NOW)
+
+    assert len(responses.calls) == 1
+    assert len(claude_token) == 1
+    assert second.screen is not None
+    assert second.screen.view.label.startswith("wk ")
+    assert len(draw_bodies(bar_transport)) == 2
+
+
+@responses.activate
+def test_limits_tick_reuse_usage_without_a_previous_screen_fetches(config, bar_transport, claude_token):
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH)
+
+    result = watch.limits_tick(config, None, kind="weekly", reuse_usage=True, now=NOW)
+
+    assert len(responses.calls) == 1
+    assert result.screen is not None
 
 
 @responses.activate
@@ -529,7 +578,7 @@ def test_limits_tick_skips_the_draw_when_nothing_changed(config, bar_transport, 
 @responses.activate
 def test_limits_tick_swallows_a_transient_failure_and_keeps_the_previous_screen(config, bar_transport, claude_token):
     responses.get(USAGE_URL, status=500)
-    previous = watch.LimitsScreen(session=bar.LimitRow(1, None), weekly=bar.LimitRow(2, None))
+    previous = watch.LimitsScreen(view=bar.LimitView("5h 1%", 1), usage=usage(1, 2))
 
     result = watch.limits_tick(config, previous, now=NOW)
 
@@ -584,21 +633,6 @@ def test_limits_tick_resolves_the_token_on_every_call(config, bar_transport, cla
 
 
 @responses.activate
-def test_a_countdown_dropping_below_the_threshold_is_redrawn_blank(config, bar_transport, claude_token):
-    bar_transport.add("POST", DRAW_PATH)
-    responses.get(USAGE_URL, json=usage_body(session=90))
-    first = watch.limits_tick(config, None, now=NOW)
-    responses.replace(responses.GET, USAGE_URL, json=usage_body(session=50))
-
-    watch.limits_tick(config, first.screen, now=NOW)
-
-    before, after = draw_bodies(bar_transport)
-    texts = lambda body: {element["id"]: element["text"] for element in body["elements"] if element["type"] == "text"}
-    assert texts(before)["session-reset"] == "3h59m"
-    assert texts(after)["session-reset"] == " "
-
-
-@responses.activate
 def test_watch_limits_clears_on_start_and_on_interrupt(config, bar_transport, claude_token):
     bar_transport.add("DELETE", DRAW_PATH)
     bar_transport.add("POST", DRAW_PATH)
@@ -642,11 +676,164 @@ def test_watch_limits_ends_on_a_rejected_token_after_clearing(config, bar_transp
 
 @responses.activate
 def test_limits_tick_does_not_redraw_when_only_invisible_values_changed(config, bar_transport, claude_token):
-    """At 10% there is no countdown and the fill width is unchanged, so a later clock must not cause a draw."""
-    responses.get(USAGE_URL, json=usage_body(session=10.0, weekly=10.0))
+    """Sub-integer percent drift and seconds inside the same minute change no lit pixel and no character."""
+    responses.get(USAGE_URL, json=usage_body(session=10.0))
     bar_transport.add("POST", DRAW_PATH)
+    first = watch.limits_tick(config, None, now=NOW - timedelta(seconds=30))
+    responses.replace(responses.GET, USAGE_URL, json=usage_body(session=10.2))
 
-    first = watch.limits_tick(config, None, now=NOW)
-    watch.limits_tick(config, first.screen, now=NOW + timedelta(minutes=3))
+    watch.limits_tick(config, first.screen, now=NOW)
+
+    assert len(draw_bodies(bar_transport)) == 1
+
+
+class FakeListener:
+    """Stands in for bar.StartButtonListener: scripted `wait_for_press` results, then Ctrl+C."""
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.started = False
+        self.stopped = False
+        self.timeouts = []
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def wait_for_press(self, timeout):
+        self.timeouts.append(timeout)
+        if not self.results:
+            raise KeyboardInterrupt
+        return self.results.pop(0)
+
+
+def labels_drawn(bar_transport):
+    return [label_of(body) for body in draw_bodies(bar_transport)]
+
+
+@responses.activate
+def test_a_press_switches_to_weekly_and_redraws_without_fetching(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True))
+
+    assert len(responses.calls) == 1
+    labels = labels_drawn(bar_transport)
+    assert [label.split()[0] for label in labels] == ["5h", "wk"]
+
+
+@responses.activate
+def test_a_second_press_returns_to_the_five_hour_view(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True, True))
+
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk", "5h"]
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_a_timeout_poll_with_unchanged_data_does_not_redraw(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(False))
+
+    assert len(responses.calls) == 2
+    assert len(draw_bodies(bar_transport)) == 1
+
+
+@responses.activate
+def test_a_press_during_a_retry_after_wait_redraws_from_the_cache_and_keeps_waiting(
+    config, bar_transport, claude_token
+):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+    responses.get(USAGE_URL, status=429, headers={"Retry-After": "600"})
+    listener = FakeListener(False, True)
+
+    watch.watch_limits(config, interval=180, listener=listener)
+
+    assert len(responses.calls) == 2  # the press fetched nothing
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk"]
+    assert 179 < listener.timeouts[0] <= 180
+    assert 590 < listener.timeouts[2] <= 600  # the wait after the press is what is left of the Retry-After
+
+
+@responses.activate
+def test_a_press_before_the_first_successful_fetch_switches_the_view_the_next_fetch_draws(
+    config, bar_transport, claude_token
+):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, status=500)
+    responses.get(USAGE_URL, json=usage_body())
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True, False))
+
+    assert len(responses.calls) == 2
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["wk"]
+
+
+@responses.activate
+def test_two_presses_around_a_failed_redraw_leave_the_display_consistent(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH, status=401)  # the redraw for press one is refused
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True, True))
+
+    # Press two flips back to the view that is still on the bar, so nothing more is drawn.
+    assert len(draw_bodies(bar_transport)) == 2
+
+
+@responses.activate
+def test_the_listener_is_started_and_stopped_even_on_interrupt(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+    listener = FakeListener()
+
+    watch.watch_limits(config, interval=180, listener=listener)
+
+    assert listener.started
+    assert listener.stopped
+
+
+@responses.activate
+def test_the_listener_is_stopped_when_a_rejected_token_ends_the_watch(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    responses.get(USAGE_URL, status=401)
+    listener = FakeListener()
+
+    with pytest.raises(exceptions.ClaudeAuthError):
+        watch.watch_limits(config, interval=180, listener=listener)
+
+    assert listener.stopped
+
+
+@responses.activate
+def test_an_injected_sleep_runs_without_creating_a_listener(config, bar_transport, claude_token, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a listener must not be created when sleep is injected")
+
+    monkeypatch.setattr(watch.bar, "StartButtonListener", forbidden)
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+
+    def sleep(seconds):
+        raise KeyboardInterrupt
+
+    watch.watch_limits(config, interval=180, sleep=sleep)
 
     assert len(draw_bodies(bar_transport)) == 1

@@ -1,9 +1,12 @@
 """Tests for BUSY Bar payload construction and delivery."""
 
+import asyncio
 import json
+import logging
 import struct
 import time
 
+from busylib import exceptions as busylib_exceptions
 import httpx2
 from pydantic import ValidationError
 import pytest
@@ -331,8 +334,8 @@ def test_undisplayable_characters_are_dropped_rather_than_replaced(text, expecte
     assert bar.strip_undisplayable(text) == expected
 
 
-def limits_elements(session, weekly):
-    payload = bar.build_limits_payload(session=session, weekly=weekly)
+def limits_elements(view):
+    payload = bar.build_limits_payload(view)
     return payload, {element.id: element for element in payload.elements}
 
 
@@ -366,81 +369,165 @@ def test_rectangle_serialises_for_the_wire():
     [(3.0, 2), (50, 35), (100, 70), (150, 70)],
 )
 def test_fill_width_is_proportional_and_clamped(percent, width):
-    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(percent, None))
+    _, elements = limits_elements(bar.LimitView("5h", percent))
 
-    assert elements["session-fill"].width == width
-    assert elements["weekly-fill"].width == width
+    assert elements["limit-fill"].width == width
 
 
 @pytest.mark.parametrize("percent", [0, 0.3, -5])
 def test_an_empty_bar_still_draws_its_fill_so_a_previous_fill_is_overwritten(percent):
     """A draw never removes omitted ids, so a fill that reset to ~0 must be redrawn, invisibly, not left out."""
-    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(percent, None))
+    _, elements = limits_elements(bar.LimitView("5h", percent))
 
-    for prefix in ("session", "weekly"):
-        fill = elements[f"{prefix}-fill"]
-        assert fill.width == 1
-        assert fill.fill_colors == [bar.LIMITS_TRACK_COLOR + "FF"]
+    fill = elements["limit-fill"]
+    assert fill.width == 1
+    assert fill.fill_colors == [bar.LIMITS_TRACK_COLOR + "FF"]
 
 
 @pytest.mark.parametrize(("percent", "color"), [(85, "#CD6E58FF"), (85.1, "#B3261EFF")])
 def test_fill_turns_red_above_85_percent(percent, color):
-    _, elements = limits_elements(bar.LimitRow(percent, None), bar.LimitRow(10, None))
+    _, elements = limits_elements(bar.LimitView("5h", percent))
 
-    assert elements["session-fill"].fill_colors == [color]
-    assert elements["weekly-fill"].fill_colors == ["#CD6E58FF"]
-
-
-@pytest.mark.parametrize(
-    ("percent", "countdown", "shown"),
-    [(75, "3h59m", " "), (75.1, "3h59m", "3h59m"), (99, None, " "), (10, "3h59m", " ")],
-)
-def test_countdown_only_shows_above_75_percent(percent, countdown, shown):
-    _, elements = limits_elements(bar.LimitRow(percent, countdown), bar.LimitRow(0, None))
-
-    assert elements["session-reset"].text == shown
-    assert elements["session-reset"].font == "tiny"
+    assert elements["limit-fill"].fill_colors == [color]
 
 
-def test_a_hidden_countdown_is_still_drawn_so_it_overwrites_the_old_one():
-    payload, _ = limits_elements(bar.LimitRow(0, None), bar.LimitRow(0, None))
+def test_payload_is_track_fill_label_in_draw_order():
+    payload, _ = limits_elements(bar.LimitView("5h 90% 1h00m", 90))
 
-    ids = [element.id for element in payload.elements]
-
-    assert "session-reset" in ids
-    assert "weekly-reset" in ids
+    assert [element.id for element in payload.elements] == ["limit-track", "limit-fill", "limit-label"]
 
 
-def test_elements_have_stable_ids_and_draw_order():
-    payload, _ = limits_elements(bar.LimitRow(90, "1h00m"), bar.LimitRow(80, "2d"))
+def test_bar_fills_the_bottom_rows_leaving_one_blank_row_under_the_label():
+    """Condensed digits ink rows 0-6 at y=-2, so a bar from row 8 leaves exactly row 7 blank."""
+    _, elements = limits_elements(bar.LimitView("5h", 50))
 
-    assert [element.id for element in payload.elements] == [
-        "session-track",
-        "session-fill",
-        "session-reset",
-        "weekly-track",
-        "weekly-fill",
-        "weekly-reset",
-    ]
+    assert (bar.LIMITS_BAR_Y, bar.LIMITS_TRACK_HEIGHT) == (8, 8)
+    assert bar.LIMITS_BAR_Y + bar.LIMITS_TRACK_HEIGHT == bar.FRONT_DISPLAY_HEIGHT
+    assert elements["limit-track"].y == bar.LIMITS_BAR_Y
+    assert bar.LIMITS_BAR_Y + bar.LIMITS_TRACK_HEIGHT <= bar.FRONT_DISPLAY_HEIGHT
+    assert elements["limit-track"].width == bar.LIMITS_TRACK_WIDTH
 
 
-def test_limits_payload_is_scoped_to_the_application():
-    payload, _ = limits_elements(bar.LimitRow(1, None), bar.LimitRow(1, None))
+def test_label_text_font_and_position():
+    _, elements = limits_elements(bar.LimitView("5h 85% 3h49m", 85))
+
+    label = elements["limit-label"]
+    assert label.text == "5h 85% 3h49m"
+    assert label.font == "condensed"
+    assert (label.x, label.y) == (bar.LIMITS_LABEL_X, bar.LIMITS_LABEL_Y)
+    assert label.color == "#E6E6E6FF"
+
+
+def test_payload_is_scoped_to_the_application():
+    payload, _ = limits_elements(bar.LimitView("5h", 1))
 
     assert payload.application_name == bar.APPLICATION_NAME
 
 
-def test_countdown_text_color_matches_the_fill():
-    _, elements = limits_elements(bar.LimitRow(80, "1h00m"), bar.LimitRow(90, "2d"))
-
-    assert elements["session-reset"].color == "#1A1A1AFF"
-    assert elements["weekly-reset"].color == "#FFFFFFFF"
+def button_message(button="START", action="PRESS"):
+    """A state message shaped the way busylib hands them out for a button update."""
+    return {"updates": [{"input": {"button_event": {"button": button, "action": action}}}]}
 
 
-def test_rows_are_stacked_on_the_front_display():
-    _, elements = limits_elements(bar.LimitRow(50, None), bar.LimitRow(50, None))
+def listener_with(config, *messages, gap=0.0):
+    """A listener over a fake status stream that yields `messages`, `gap` seconds apart, then ends."""
 
-    assert elements["session-track"].y == bar.LIMITS_SESSION_Y
-    assert elements["weekly-track"].y == bar.LIMITS_WEEKLY_Y
-    assert elements["session-track"].width == bar.LIMITS_TRACK_WIDTH
-    assert bar.LIMITS_WEEKLY_Y + bar.LIMITS_TRACK_HEIGHT <= bar.FRONT_DISPLAY_HEIGHT
+    async def stream():
+        for index, message in enumerate(messages):
+            if index and gap:
+                await asyncio.sleep(gap)
+            yield message
+
+    return bar.StartButtonListener(config, stream=stream)
+
+
+@pytest.fixture
+def fast_retries(monkeypatch):
+    monkeypatch.setattr(bar, "LISTENER_RETRY_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(bar, "LISTENER_RETRY_MAX_SECONDS", 0.02)
+
+
+def test_a_start_press_wakes_wait_for_press(config, fast_retries):
+    with listener_with(config, button_message()) as listener:
+        assert listener.wait_for_press(2) is True
+
+
+def test_wait_for_press_times_out_with_false(config):
+    with listener_with(config) as listener:
+        assert listener.wait_for_press(0.05) is False
+
+
+def test_release_ok_and_back_are_ignored(config):
+    messages = [
+        button_message("START", "RELEASE"),
+        button_message("OK", "PRESS"),
+        button_message("BACK", "PRESS"),
+        {"updates": [{"input": {"switch_event": {"position": "APPS"}}}]},
+        {"updates": [{"input": {"encoder_event": {"delta": 2}}}]},
+        "a text frame",
+        {"updates": [{"frame": {}}]},
+    ]
+    with listener_with(config, *messages) as listener:
+        assert listener.wait_for_press(0.2) is False
+
+
+def test_two_presses_are_two_wakes(config, fast_retries):
+    with listener_with(config, button_message(), button_message(), gap=0.2) as listener:
+        assert listener.wait_for_press(2) is True
+        assert listener.wait_for_press(2) is True
+
+
+def test_a_stream_that_raises_is_retried_and_never_escapes(config, fast_retries):
+    attempts = []
+
+    async def stream():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise busylib_exceptions.BusyBarWebSocketError("dropped", path="/api/status/ws", original=OSError("reset"))
+        yield button_message()
+
+    with bar.StartButtonListener(config, stream=stream) as listener:
+        assert listener.wait_for_press(2) is True
+
+    assert len(attempts) >= 2
+
+
+def test_stop_returns_promptly_and_ends_the_thread(config):
+    async def stream():
+        await asyncio.Event().wait()
+        yield {}
+
+    listener = bar.StartButtonListener(config, stream=stream)
+    listener.start()
+    started = time.monotonic()
+
+    listener.stop()
+
+    assert time.monotonic() - started < 1
+    assert listener._thread is not None
+    assert not listener._thread.is_alive()
+
+
+def test_websockets_request_logging_cannot_leak_the_token_under_verbose(caplog):
+    """busylib puts the token in the WebSocket URL and `websockets` logs the request line at DEBUG."""
+    caplog.set_level(logging.DEBUG)
+
+    logging.getLogger("websockets.client").debug("> GET /api/status/ws?x-api-token=SECRET HTTP/1.1")
+
+    assert "SECRET" not in caplog.text
+
+
+def test_a_failing_stream_is_logged_by_type_only(config, fast_retries, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    async def stream():
+        raise busylib_exceptions.BusyBarWebSocketError(
+            "failed for wss://bar/api/status/ws?x-api-token=SECRET", path="/api/status/ws", original=OSError("x")
+        )
+        yield {}
+
+    with bar.StartButtonListener(config, stream=stream) as listener:
+        listener.wait_for_press(0.1)
+
+    assert "BusyBarWebSocketError" in caplog.text
+    assert "SECRET" not in caplog.text

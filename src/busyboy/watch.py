@@ -5,6 +5,7 @@ import dataclasses
 from datetime import UTC, datetime, timedelta
 import logging
 import time
+from typing import Literal
 
 from busyboy import bar, claude, exceptions, github
 from busyboy.config import BusyboyConfig
@@ -232,12 +233,20 @@ def _poll[ScreenT](
 DEFAULT_LIMITS_INTERVAL_SECONDS = 180
 
 
+type LimitKind = Literal["session", "weekly"]
+
+
 @dataclasses.dataclass(frozen=True)
 class LimitsScreen:
-    """Exactly what the limits bars show. Comparing two of these decides whether to redraw."""
+    """
+    What the limits display shows, plus the usage it came from.
 
-    session: bar.LimitRow
-    weekly: bar.LimitRow
+    `view` is what gets drawn; `usage` is kept so a Start-button press can redraw the other limit
+    without another API call.
+    """
+
+    view: bar.LimitView
+    usage: claude.Usage
 
 
 def _clock(remaining: timedelta) -> tuple[int, int]:
@@ -262,56 +271,70 @@ def format_weekly_countdown(remaining: timedelta) -> str:
     return format_session_countdown(remaining)
 
 
-def render_limits(usage: claude.Usage, now: datetime) -> LimitsScreen:
+def format_weekly_label_time(remaining: timedelta) -> str:
     """
-    Turn fetched usage into the two bar rows.
+    Format the time to the weekly reset for the bar label: `6d` from 48h, whole hours (`47h`) under that, `59m` under an hour.
 
-    The countdown is always computed when a reset time exists; whether it is shown is
-    `bar`'s decision (it only draws above the threshold). A missing reset time means no
-    countdown rather than an error.
+    The countdown's `1d 23h` and `23h59m` forms make `wk 100% ...` wider than the 72px display in the label font
+    (measured on a real bar), and a weekly reset does not need that precision on a bar.
     """
-
-    def row(window: claude.Window, fmt: Callable[[timedelta], str]) -> bar.LimitRow:
-        countdown = None if window.resets_at is None else fmt(window.resets_at - now)
-        return bar.LimitRow(window.utilization, countdown)
-
-    return LimitsScreen(
-        session=row(usage.session, format_session_countdown),
-        weekly=row(usage.weekly, format_weekly_countdown),
-    )
+    if remaining >= timedelta(hours=48):
+        return format_weekly_countdown(remaining)
+    hours, _ = _clock(remaining)
+    return f"{hours}h" if hours else format_session_countdown(remaining)
 
 
-def _limits_payload(screen: LimitsScreen) -> bar.DisplayElements:
-    return bar.build_limits_payload(session=screen.session, weekly=screen.weekly)
+def format_limit_label(kind: LimitKind, window: claude.Window, now: datetime) -> str:
+    """
+    Format the short bar label: `5h 85% 3h49m`, `wk 40% 6d`; the time is left off without a reset time.
+
+    The percent is rounded and clamped to 0-100 so the label never outgrows the display.
+    """
+    name, fmt = ("5h", format_session_countdown) if kind == "session" else ("wk", format_weekly_label_time)
+    label = f"{name} {round(min(max(window.utilization, 0), 100))}%"
+    return label if window.resets_at is None else f"{label} {fmt(window.resets_at - now)}"
+
+
+def render_limits(usage: claude.Usage, now: datetime, kind: LimitKind) -> LimitsScreen:
+    """Turn fetched usage into the one limit being shown."""
+    window = usage.session if kind == "session" else usage.weekly
+    return LimitsScreen(view=bar.LimitView(format_limit_label(kind, window, now), window.utilization), usage=usage)
 
 
 def limits_tick(
     config: BusyboyConfig,
     previous: LimitsScreen | None,
     *,
+    kind: LimitKind = "session",
+    reuse_usage: bool = False,
     now: datetime | None = None,
 ) -> TickResult[LimitsScreen]:
     """
-    Run one limits poll cycle, returning the state now on the bar.
+    Run one limits poll cycle for the selected limit, returning the state now on the bar.
 
-    The Claude token is re-resolved every call: Claude Code refreshes its own token in
-    the keychain, so a token read once at startup would go stale in a long watch.
-    Transient Claude failures and bar delivery failures leave the display untouched.
-    ClaudeAuthError (and any other ClaudeError) is deliberately not caught: a rejected
-    or expired token never self-heals, so it ends the watch.
+    With `reuse_usage` and a previous screen, the usage that screen carries is rendered again instead of
+    fetching: that is how a Start-button press redraws immediately. Without a previous screen there is
+    nothing to reuse, so it fetches regardless.
+
+    The Claude token is re-resolved on every fetch: Claude Code refreshes its own token in the keychain,
+    so a token read once at startup would go stale in a long watch. Transient Claude failures and bar
+    delivery failures leave the display untouched. ClaudeAuthError (and any other ClaudeError) is
+    deliberately not caught: a rejected or expired token never self-heals, so it ends the watch.
     """
-    try:
-        usage = claude.fetch_usage(claude.resolve_token())
-    except exceptions.ClaudeTransientError as error:
-        LOGGER.debug("Claude usage request failed, keeping the display as it is: %s", error)
-        return TickResult(screen=previous, retry_after=error.retry_after)
+    if reuse_usage and previous is not None:
+        usage = previous.usage
+    else:
+        try:
+            usage = claude.fetch_usage(claude.resolve_token())
+        except exceptions.ClaudeTransientError as error:
+            LOGGER.debug("Claude usage request failed, keeping the display as it is: %s", error)
+            return TickResult(screen=previous, retry_after=error.retry_after)
 
-    screen = render_limits(usage, now or datetime.now(UTC))
-    payload = _limits_payload(screen)
-    # Compare what would be drawn, not the raw screens: the screen also holds values the payload
-    # hides (a countdown at or below the threshold, sub-pixel percent changes), which differ on almost
-    # every poll without changing a single lit pixel.
-    if previous is not None and _limits_payload(previous) == payload:
+    screen = render_limits(usage, now or datetime.now(UTC), kind)
+    payload = bar.build_limits_payload(screen.view)
+    # Compare what would be drawn, not the raw screens: the usage and the unrounded percent differ on almost
+    # every poll without changing a single lit pixel or character.
+    if previous is not None and bar.build_limits_payload(previous.view) == payload:
         return TickResult(screen=screen)
 
     try:
@@ -327,11 +350,50 @@ def watch_limits(
     *,
     interval: int = DEFAULT_LIMITS_INTERVAL_SECONDS,
     sleep: Callable[[float], None] | None = None,
+    listener: bar.ButtonListener | None = None,
 ) -> None:
     """
     Poll Claude's usage limits until interrupted, then clear the display.
 
-    Like `watch`, it clears first (so nothing left by another busyboy invocation sits under
-    the bars) and clears again on any exit. There are no icons to upload.
+    One limit is shown at a time, the 5-hour one first. Each Start-button press on the bar switches to the
+    other and redraws at once from the usage already fetched. A press never fetches and never shortens the
+    wait: the wait is a deadline that presses are handled inside of, so the fetch cadence and any Retry-After
+    back-off are exactly what they would be without the button.
+
+    Like `watch`, it clears first (so nothing left by another busyboy invocation sits under the display)
+    and clears again on any exit. There are no icons to upload.
+
+    `sleep`, when given, replaces the wait entirely (tests drive the loop with it) and no button listener is
+    created, so a press can never happen. Otherwise the wait uses the listener's `wait_for_press`.
+    `listener` is resolved here so tests can inject a fake.
     """
-    _poll(config, lambda previous: limits_tick(config, previous), interval=interval, sleep=sleep)
+    active = None if sleep is not None else listener if listener is not None else bar.StartButtonListener(config)
+    kind: LimitKind = "session"
+    shown: LimitsScreen | None = None
+
+    def step(_previous: LimitsScreen | None) -> TickResult[LimitsScreen]:
+        nonlocal shown
+        result = limits_tick(config, shown, kind=kind)
+        shown = result.screen
+        return result
+
+    def pause(seconds: float) -> None:
+        nonlocal kind, shown
+        if active is None:
+            assert sleep is not None  # narrows the type: `active` is None only when `sleep` is given
+            sleep(seconds)
+            return
+        deadline = time.monotonic() + seconds
+        while (remaining := deadline - time.monotonic()) > 0 and active.wait_for_press(remaining):
+            kind = "weekly" if kind == "session" else "session"
+            if shown is not None:
+                # `limits_tick` keeps the previous screen if the draw fails, so `shown` always matches the bar.
+                shown = limits_tick(config, shown, kind=kind, reuse_usage=True).screen
+
+    if active is not None:
+        active.start()
+    try:
+        _poll(config, step, interval=interval, sleep=pause)
+    finally:
+        if active is not None:
+            active.stop()
