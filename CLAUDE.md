@@ -346,14 +346,15 @@ Measured against a real bar by capturing frames from `/api/screen` and analysing
   (9 rows) or taller — `condensed`, `normal`, `bold`, `extra_large`, and `large` — cannot be stacked twice:
   9+9=18 exceeds the 16-row display, and the others are taller still.
 - **Filled rectangles need device API >= 24.3.0** (busylib's `RECTANGLE_FILL_VERSION`); confirmed working on
-  27.14.0. The limits layout is a `small` text label at `y=-2` (inking rows 0-4 for digits and
-  lowercase) over one 70x7 track at `x=1`, `y=9` with a fill rectangle on top. Measured widths of the widest
-  labels on a real bar: `wk 100% 23h59m` is 58px in `tiny` and 55px in `small`, `5h 100% 3h49m` 52px and 49px,
-  so every label fits the 72px display without scrolling (`small` is the larger and was chosen). **A draw
-  replaces elements by id but never removes omitted ones**, so an empty bar's fill is redrawn as a 1px
-  track-coloured rectangle; leaving it out of the payload would leave the old pixels up. Switching between the
-  two limits needs no blanking because both use the same three ids (`limit-track`, `limit-fill`,
-  `limit-label`).
+  27.14.0. The limits layout is a `condensed` text label at `y=-2` (inking rows 0-6) over one 70x8 track at `x=1`,
+  `y=8` (rows 8-15) with a fill rectangle on top, leaving row 7 blank. `condensed` is the largest font whose
+  labels fit: measured on a real bar, `normal` and `bold` clip even short labels at the 72px edge, while
+  `condensed` gives `5h 100% 4h58m` 68px and `wk 100% 47h` well inside. Two label forms were too wide and are
+  shortened for the label only (`watch.format_weekly_label_time`): the weekly `1d 23h` and `23h59m` become `47h`
+  and `23h` (an `m` is cut off at 71px otherwise). **A draw replaces elements by id but never removes omitted
+  ones**, so an empty bar's fill is redrawn as a 1px track-coloured rectangle; leaving it out of the payload
+  would leave the old pixels up. Switching between the two limits needs no blanking because both use the same
+  three ids (`limit-track`, `limit-fill`, `limit-label`).
 - **Redrawing an element restarts its scroll animation.** Confirmed on a real bar: when a watched workflow's
   status changed and `watch.tick` issued a redraw, the scrolling repo row jumped back to its starting position
   rather than continuing from where it was. This is why `tick` compares the freshly rendered `Screen` against

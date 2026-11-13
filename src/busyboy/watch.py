@@ -271,13 +271,26 @@ def format_weekly_countdown(remaining: timedelta) -> str:
     return format_session_countdown(remaining)
 
 
+def format_weekly_label_time(remaining: timedelta) -> str:
+    """
+    Format the time to the weekly reset for the bar label: `6d` from 48h, whole hours (`47h`) under that, `59m` under an hour.
+
+    The countdown's `1d 23h` and `23h59m` forms make `wk 100% ...` wider than the 72px display in the label font
+    (measured on a real bar), and a weekly reset does not need that precision on a bar.
+    """
+    if remaining >= timedelta(hours=48):
+        return format_weekly_countdown(remaining)
+    hours, _ = _clock(remaining)
+    return f"{hours}h" if hours else format_session_countdown(remaining)
+
+
 def format_limit_label(kind: LimitKind, window: claude.Window, now: datetime) -> str:
     """
     Format the short bar label: `5h 85% 3h49m`, `wk 40% 6d`; the time is left off without a reset time.
 
     The percent is rounded and clamped to 0-100 so the label never outgrows the display.
     """
-    name, fmt = ("5h", format_session_countdown) if kind == "session" else ("wk", format_weekly_countdown)
+    name, fmt = ("5h", format_session_countdown) if kind == "session" else ("wk", format_weekly_label_time)
     label = f"{name} {round(min(max(window.utilization, 0), 100))}%"
     return label if window.resets_at is None else f"{label} {fmt(window.resets_at - now)}"
 

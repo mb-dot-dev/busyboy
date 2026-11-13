@@ -488,13 +488,20 @@ def usage(session, weekly, session_resets=timedelta(hours=1), weekly_resets=time
     [
         ("session", 85.0, timedelta(hours=3, minutes=49), "5h 85% 3h49m"),
         ("weekly", 40.0, timedelta(days=6, hours=2), "wk 40% 6d"),
-        ("weekly", 40.0, timedelta(hours=29), "wk 40% 1d 5h"),
+        ("weekly", 40.0, timedelta(hours=29), "wk 40% 29h"),
+        ("weekly", 100.0, timedelta(hours=47, minutes=59), "wk 100% 47h"),
+        ("weekly", 40.0, timedelta(hours=48), "wk 40% 2d"),
         ("session", 99.6, timedelta(hours=1), "5h 100% 1h00m"),
         ("session", 150.0, timedelta(hours=1), "5h 100% 1h00m"),
         ("session", -3.0, timedelta(hours=1), "5h 0% 1h00m"),
         ("session", 0.4, timedelta(hours=1), "5h 0% 1h00m"),
         ("session", 85.0, None, "5h 85%"),
         ("session", 85.0, timedelta(hours=-1), "5h 85% 0m"),
+        # Under two days the weekly label is whole hours: `wk 100% 1d 23h` and `wk 100% 23h59m` are wider than the display.
+        ("weekly", 100.0, timedelta(hours=23, minutes=59), "wk 100% 23h"),
+        ("weekly", 40.0, timedelta(hours=5, minutes=5), "wk 40% 5h"),
+        ("weekly", 40.0, timedelta(minutes=59), "wk 40% 59m"),
+        ("weekly", 40.0, timedelta(hours=-1), "wk 40% 0m"),
     ],
 )
 def test_format_limit_label(kind, utilization, remaining, expected):

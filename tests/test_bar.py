@@ -397,9 +397,12 @@ def test_payload_is_track_fill_label_in_draw_order():
     assert [element.id for element in payload.elements] == ["limit-track", "limit-fill", "limit-label"]
 
 
-def test_bar_is_on_the_bottom_rows():
+def test_bar_fills_the_bottom_rows_leaving_one_blank_row_under_the_label():
+    """Condensed digits ink rows 0-6 at y=-2, so a bar from row 8 leaves exactly row 7 blank."""
     _, elements = limits_elements(bar.LimitView("5h", 50))
 
+    assert (bar.LIMITS_BAR_Y, bar.LIMITS_TRACK_HEIGHT) == (8, 8)
+    assert bar.LIMITS_BAR_Y + bar.LIMITS_TRACK_HEIGHT == bar.FRONT_DISPLAY_HEIGHT
     assert elements["limit-track"].y == bar.LIMITS_BAR_Y
     assert bar.LIMITS_BAR_Y + bar.LIMITS_TRACK_HEIGHT <= bar.FRONT_DISPLAY_HEIGHT
     assert elements["limit-track"].width == bar.LIMITS_TRACK_WIDTH
@@ -410,7 +413,7 @@ def test_label_text_font_and_position():
 
     label = elements["limit-label"]
     assert label.text == "5h 85% 3h49m"
-    assert label.font == "small"
+    assert label.font == "condensed"
     assert (label.x, label.y) == (bar.LIMITS_LABEL_X, bar.LIMITS_LABEL_Y)
     assert label.color == "#E6E6E6FF"
 

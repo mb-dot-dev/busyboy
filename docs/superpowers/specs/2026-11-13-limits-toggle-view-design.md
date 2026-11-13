@@ -98,3 +98,10 @@ integer. Time format reuses `format_session_countdown` / `format_weekly_countdow
   (it would have needed an injected press, which would act on the user's device).
 - `busyboy claude limits` ran against the bar, drew the label and bar, and on Ctrl+C exited 0 with the display
   cleared.
+
+## Follow-up after trying it on the bar (2026-11-13)
+
+The `small` label (5 rows tall) looked small and left a 4-row gap above the bar. Changed to `condensed` (7 rows
+inked), with the bar moved to rows 8-15 so one blank row separates them. `normal` and `bold` were measured and
+clip at 72px. At 71px, `wk 100% 23h59m` and `wk 100% 1d 23h` lose their last character in `condensed`, so the
+weekly label time is now `6d` from 48h, whole hours (`47h`) under that, and `59m` under an hour.

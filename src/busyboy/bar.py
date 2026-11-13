@@ -99,20 +99,22 @@ REPO_ELEMENT_ID = "repo"
 REF_ELEMENT_ID = "ref"
 ICON_ELEMENT_ID = "icon"
 
-# One-limit layout on the 72x16 front display: a short `small` text label in rows 0-6 and a 7-row bar in rows
-# 9-15 (row 7 and 8 left dark). `small`'s glyph box sits two rows below the `y` it is given
-# (FONT_GLYPH_OFFSETS), so `y=-2` inks from row 0. Filled rectangles need device API >= 24.3.0.
+# One-limit layout on the 72x16 front display: a `condensed` text label inking rows 0-6, one blank row, and an
+# 8-row bar in rows 8-15. `condensed`'s glyph box sits two rows below the `y` it is given (FONT_GLYPH_OFFSETS), so
+# `y=-2` inks from row 0; its digits and lowercase letters use 7 of the box's 9 rows. `condensed` is the largest
+# font whose labels fit the 72px width (`normal` and `bold` clip even short ones). Filled rectangles need device
+# API >= 24.3.0.
 LIMITS_TRACK_X = 1
 LIMITS_TRACK_WIDTH = 70
-LIMITS_TRACK_HEIGHT = 7
-LIMITS_BAR_Y = 9
+LIMITS_TRACK_HEIGHT = 8
+LIMITS_BAR_Y = 8
 LIMITS_TRACK_COLOR = "#1F1F1F"
 LIMITS_FILL_COLOR = "#CD6E58"
 LIMITS_HIGH_FILL_COLOR = "#B3261E"
 LIMITS_HIGH_THRESHOLD = 85
 LIMITS_LABEL_X = 1
 LIMITS_LABEL_Y = -2
-LIMITS_LABEL_FONT: MeasuredFontName = "small"
+LIMITS_LABEL_FONT: MeasuredFontName = "condensed"
 LIMITS_LABEL_COLOR = "#E6E6E6"
 
 
