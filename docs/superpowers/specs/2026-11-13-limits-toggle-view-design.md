@@ -87,3 +87,14 @@ integer. Time format reuses `format_session_countdown` / `format_weekly_countdow
 - Replace the tests that assume two bars and the 75% threshold; add tests for the toggle, immediate redraw on press,
   no-redraw-when-unchanged, listener failure not ending the watch, and label formatting.
 - Update CLAUDE.md (watch/bar descriptions, the 70x7 two-track layout in Hardware facts) and the CLI help.
+
+## Measured on a real bar (2026-11-13)
+
+- Widest labels: `wk 100% 23h59m` is 58px in `tiny` and 55px in `small`; `5h 100% 3h49m` is 52px and 49px. All fit
+  72px, so `small` (the larger font) was kept and no label was shortened.
+- `small` at `y=-2` inks rows 0-4 for digits and lowercase letters (descenders reach row 6).
+- The real `StartButtonListener` connected to the bar's status WebSocket for 6s with no stream failures and
+  stopped in under 0.1s. A physical Start press was not exercised by the author; `enable=False` was not tried
+  (it would have needed an injected press, which would act on the user's device).
+- `busyboy claude limits` ran against the bar, drew the label and bar, and on Ctrl+C exited 0 with the display
+  cleared.
