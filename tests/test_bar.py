@@ -4,9 +4,11 @@ import asyncio
 import json
 import logging
 import struct
+import threading
 import time
 
 from busylib import exceptions as busylib_exceptions
+from busylib.features.input_events import ButtonEvent
 import httpx2
 from pydantic import ValidationError
 import pytest
@@ -429,8 +431,8 @@ def button_message(button="START", action="PRESS"):
     return {"updates": [{"input": {"button_event": {"button": button, "action": action}}}]}
 
 
-def listener_with(config, *messages, gap=0.0):
-    """A listener over a fake status stream that yields `messages`, `gap` seconds apart, then ends."""
+def collect(config, *messages, gap=0.0, count=None, timeout=2.0):
+    """Subscribe to the events of a fake status stream that yields `messages`, `gap` seconds apart, then ends."""
 
     async def stream():
         for index, message in enumerate(messages):
@@ -438,7 +440,23 @@ def listener_with(config, *messages, gap=0.0):
                 await asyncio.sleep(gap)
             yield message
 
-    return bar.StartButtonListener(config, stream=stream)
+    return collect_from(config, stream, count=count, timeout=timeout)
+
+
+def collect_from(config, stream, *, count=None, timeout=2.0):
+    """Collect events until `count` have arrived or `timeout` passes, then dispose the subscription."""
+    events = []
+    arrived = threading.Event()
+
+    def on_next(event):
+        events.append(event)
+        if count is not None and len(events) >= count:
+            arrived.set()
+
+    subscription = bar.start_button_events(config, stream=stream).subscribe(on_next)
+    arrived.wait(timeout)
+    subscription.dispose()
+    return events
 
 
 @pytest.fixture
@@ -447,19 +465,14 @@ def fast_retries(monkeypatch):
     monkeypatch.setattr(bar, "LISTENER_RETRY_MAX_SECONDS", 0.02)
 
 
-def test_a_start_press_wakes_wait_for_press(config, fast_retries):
-    with listener_with(config, button_message()) as listener:
-        assert listener.wait_for_press(2) is True
+def test_a_start_press_and_release_are_emitted_in_order(config):
+    events = collect(config, button_message(), button_message(action="RELEASE"), count=2)
+
+    assert events == [ButtonEvent("start", "press"), ButtonEvent("start", "release")]
 
 
-def test_wait_for_press_times_out_with_false(config):
-    with listener_with(config) as listener:
-        assert listener.wait_for_press(0.05) is False
-
-
-def test_release_ok_and_back_are_ignored(config):
+def test_other_buttons_and_other_messages_emit_nothing(config):
     messages = [
-        button_message("START", "RELEASE"),
         button_message("OK", "PRESS"),
         button_message("BACK", "PRESS"),
         {"updates": [{"input": {"switch_event": {"position": "APPS"}}}]},
@@ -467,14 +480,50 @@ def test_release_ok_and_back_are_ignored(config):
         "a text frame",
         {"updates": [{"frame": {}}]},
     ]
-    with listener_with(config, *messages) as listener:
-        assert listener.wait_for_press(0.2) is False
+
+    assert collect(config, *messages, timeout=0.2) == []
 
 
-def test_two_presses_are_two_wakes(config, fast_retries):
-    with listener_with(config, button_message(), button_message(), gap=0.2) as listener:
-        assert listener.wait_for_press(2) is True
-        assert listener.wait_for_press(2) is True
+def test_two_presses_are_two_events(config, fast_retries):
+    events = collect(config, button_message(), button_message(), gap=0.05, count=2)
+
+    assert len(events) == 2
+
+
+def test_nothing_connects_until_the_first_subscription(config):
+    opened = []
+
+    async def stream():
+        opened.append(1)
+        yield {}
+
+    bar.start_button_events(config, stream=stream)
+    time.sleep(0.05)
+
+    assert opened == []
+
+
+def test_subscribers_share_one_connection_that_closes_with_the_last(config):
+    opened = []
+    first, second = [], []
+
+    async def stream():
+        opened.append(1)
+        yield button_message()
+        await asyncio.Event().wait()
+
+    events = bar.start_button_events(config, stream=stream)
+    one = events.subscribe(first.append)
+    two = events.subscribe(second.append)
+    deadline = time.monotonic() + 2
+    while not first and time.monotonic() < deadline:
+        time.sleep(0.01)
+    one.dispose()
+    assert threads_running() == 1  # the other subscriber still holds the connection open
+    two.dispose()
+
+    assert len(opened) == 1
+    assert threads_running() == 0
 
 
 def test_a_stream_that_raises_is_retried_and_never_escapes(config, fast_retries):
@@ -486,26 +535,28 @@ def test_a_stream_that_raises_is_retried_and_never_escapes(config, fast_retries)
             raise busylib_exceptions.BusyBarWebSocketError("dropped", path="/api/status/ws", original=OSError("reset"))
         yield button_message()
 
-    with bar.StartButtonListener(config, stream=stream) as listener:
-        assert listener.wait_for_press(2) is True
+    events = collect_from(config, stream, count=1)
 
+    assert events == [ButtonEvent("start", "press")]
     assert len(attempts) >= 2
 
 
-def test_stop_returns_promptly_and_ends_the_thread(config):
+def threads_running():
+    return sum(1 for thread in threading.enumerate() if thread.name == "busyboy-start-button")
+
+
+def test_disposing_returns_promptly_and_ends_the_thread(config):
     async def stream():
         await asyncio.Event().wait()
         yield {}
 
-    listener = bar.StartButtonListener(config, stream=stream)
-    listener.start()
+    subscription = bar.start_button_events(config, stream=stream).subscribe(lambda event: None)
     started = time.monotonic()
 
-    listener.stop()
+    subscription.dispose()
 
     assert time.monotonic() - started < 1
-    assert listener._thread is not None
-    assert not listener._thread.is_alive()
+    assert threads_running() == 0
 
 
 def test_websockets_request_logging_cannot_leak_the_token_under_verbose(caplog):
@@ -526,8 +577,7 @@ def test_a_failing_stream_is_logged_by_type_only(config, fast_retries, caplog):
         )
         yield {}
 
-    with bar.StartButtonListener(config, stream=stream) as listener:
-        listener.wait_for_press(0.1)
+    collect_from(config, stream, timeout=0.1)
 
     assert "BusyBarWebSocketError" in caplog.text
     assert "SECRET" not in caplog.text

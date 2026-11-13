@@ -66,18 +66,19 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
   Failures raise `ClaudeAuthError` / `ClaudeTransientError` / `ClaudeError`; no message ever carries the token
   or the response body. Knows nothing about the bar or Typer.
 - `src/busyboy/bar.py` — `build_text_payload`, `build_workflow_payload` and `build_limits_payload` (all pure, no I/O), `draw_text`,
-  `clear`, `upload_icons`, `StartButtonListener`, and the payload models (`TextElement`, `ImageElement`, `DisplayElements`). These
+  `clear`, `upload_icons`, `start_button_events`, and the payload models (`TextElement`, `ImageElement`, `DisplayElements`). These
   models are deliberately stricter than the vendored [`busylib`](https://github.com/busy-app/busylib-py)
   client's own — the ASCII-only text pattern and the narrowed image-path pattern below are validated here,
   before a payload ever reaches busylib, which is laxer on both. Delivery itself goes through
   `busylib.BusyBar`: `_client` builds one per call from `config.host`/`config.token_value`, and `draw_text`,
   `clear`, and `upload_icons` call its `display_draw`, `display_clear`, and `assets_upload` methods (passing
   a plain `dict` via `payload.model_dump(exclude_none=True)` rather than busylib's own `types.DisplayElements`,
-  so busyboy's stricter validation is what actually ran). `StartButtonListener` is the one place that uses
+  so busyboy's stricter validation is what actually ran). `start_button_events` is the one place that uses
   busylib's async status WebSocket: input events exist only there (the sync client raises
-  `NotImplementedError`), so it runs the stream on a daemon thread with its own event loop and exposes a
-  blocking `wait_for_press(timeout)` to the synchronous poll loop; the `ButtonListener` Protocol is what the
-  loop depends on. busylib owns retries, timeouts, and the request/
+  `NotImplementedError`). It returns a shared `reactivex` `Observable[ButtonEvent]` of every Start/Pause press
+  and release; nothing connects until the first subscription, which starts a daemon thread with its own event
+  loop, and the connection closes when the last subscriber disposes. It never errors or completes (drops are
+  retried with backoff), and subscribers are called on that thread. busylib owns retries, timeouts, and the request/
   response shape now; `_reraise_as_bar_error` maps its `busylib.exceptions.BusyBarAPIError` onto
   `busyboy.exceptions.BarAPIError` and everything else under `BusyBarError` onto `BarRequestError`, so the
   rest of busyboy still only ever sees the two-branch hierarchy described below. This is where all BUSY Bar
@@ -86,8 +87,9 @@ is allowed to know about both — does the `github.Repo(owner=owner, name=name)`
   True`, Ctrl+C, and cleanup around it), plus the Claude equivalents `limits_tick` and `watch_limits`, both
   built on one private `_poll` helper so the clear-first/clear-last and Retry-After behaviour live once.
   `limits_tick` re-resolves the Claude token on every fetch, because Claude Code refreshes its own.
-  `watch_limits` shows one limit at a time (5-hour first) and flips it on each Start-button press, redrawing
-  from the `usage` its previous `LimitsScreen` carries instead of fetching again. The only
+  `watch_limits` shows one limit at a time (5-hour first) and subscribes to `bar.start_button_events`, flipping
+  the limit on each press and redrawing from the `usage` its previous `LimitsScreen` carries instead of fetching
+  again; press handlers run on the stream's thread, so the shown state is guarded by a lock. The only
   module that imports `bar` together with a data source (`github` or `claude`), because turning fetched data
   into bar pixels is its entire job. Knows nothing about Typer or argv — `cli.py` builds its
   `Target` and passes it in. `render` composes the bottom row as the ref (`#123` for an open pull request,
@@ -160,8 +162,7 @@ other bad option.
 `busyboy claude limits` departs from the contract the same way: it shows the 5-hour session and weekly Claude
 limits one at a time until Ctrl+C, polling every `--interval` seconds (default 180): a short label (`5h 85%
 3h49m`, `wk 40% 6d`) over one bar, starting on the 5-hour limit. Each press of the bar's Start/Pause button
-switches between the two and redraws at once; the choice is not persisted. A press only fetches fresh usage if
-`--interval` seconds have passed since the last fetch. The button listener's failures (a dropped WebSocket)
+switches between the two and redraws at once; the choice is not persisted. A press never fetches. The button stream's failures (a dropped WebSocket)
 are retried quietly and never end the watch — the button just stops working until it reconnects. Startup resolves the Claude
 token and does one real usage fetch, so missing or expired credentials, an unreachable API, or an unexpected
 response print one line and exit 1; the loop then re-resolves it on each fetch

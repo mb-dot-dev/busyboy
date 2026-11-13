@@ -4,8 +4,10 @@ from datetime import UTC, datetime, timedelta
 import json
 import time
 
+from busylib.features.input_events import ButtonEvent
 import httpx2
 import pytest
+from reactivex.subject import Subject
 import requests
 import responses
 
@@ -687,64 +689,85 @@ def test_limits_tick_does_not_redraw_when_only_invisible_values_changed(config, 
     assert len(draw_bodies(bar_transport)) == 1
 
 
-class FakeListener:
-    """Stands in for bar.StartButtonListener: scripted `wait_for_press` results, then Ctrl+C."""
+PRESS = ButtonEvent("start", "press")
+RELEASE = ButtonEvent("start", "release")
 
-    def __init__(self, *results):
-        self.results = list(results)
-        self.started = False
-        self.stopped = False
-        self.timeouts = []
 
-    def start(self):
-        self.started = True
+class Script:
+    """
+    Drives `watch_limits` without a bar or a clock: each wait performs the next scripted step, then Ctrl+C.
 
-    def stop(self):
-        self.stopped = True
+    A step is an iterable of button events to emit into `buttons` during that wait, `()` for a quiet wait.
+    """
 
-    def wait_for_press(self, timeout):
-        self.timeouts.append(timeout)
-        if not self.results:
+    def __init__(self, *steps):
+        self.buttons = Subject()
+        self.steps = list(steps)
+        self.waits = []
+
+    def sleep(self, seconds):
+        self.waits.append(seconds)
+        if not self.steps:
             raise KeyboardInterrupt
-        return self.results.pop(0)
+        for event in self.steps.pop(0):
+            self.buttons.on_next(event)
+
+    def run(self, config):
+        watch.watch_limits(config, interval=180, sleep=self.sleep, buttons=self.buttons)
 
 
 def labels_drawn(bar_transport):
     return [label_of(body) for body in draw_bodies(bar_transport)]
 
 
+def register(bar_transport, *, draws=True):
+    bar_transport.add("DELETE", DRAW_PATH)
+    if draws:
+        bar_transport.add("POST", DRAW_PATH)
+
+
 @responses.activate
 def test_a_press_switches_to_weekly_and_redraws_without_fetching(config, bar_transport, claude_token):
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
+    register(bar_transport)
     responses.get(USAGE_URL, json=usage_body())
 
-    watch.watch_limits(config, interval=180, listener=FakeListener(True))
+    script = Script([PRESS])
 
-    assert len(responses.calls) == 1
-    labels = labels_drawn(bar_transport)
-    assert [label.split()[0] for label in labels] == ["5h", "wk"]
+    script.run(config)
+
+    assert len(responses.calls) == len(script.waits)  # one fetch per poll; the press itself fetched nothing
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk"]
 
 
 @responses.activate
 def test_a_second_press_returns_to_the_five_hour_view(config, bar_transport, claude_token):
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
+    register(bar_transport)
     responses.get(USAGE_URL, json=usage_body())
 
-    watch.watch_limits(config, interval=180, listener=FakeListener(True, True))
+    script = Script([PRESS, PRESS])
+
+    script.run(config)
 
     assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk", "5h"]
-    assert len(responses.calls) == 1
+    assert len(responses.calls) == len(script.waits)
 
 
 @responses.activate
-def test_a_timeout_poll_with_unchanged_data_does_not_redraw(config, bar_transport, claude_token):
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
+def test_a_release_does_not_switch_the_view(config, bar_transport, claude_token):
+    register(bar_transport)
     responses.get(USAGE_URL, json=usage_body())
 
-    watch.watch_limits(config, interval=180, listener=FakeListener(False))
+    Script([RELEASE]).run(config)
+
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h"]
+
+
+@responses.activate
+def test_a_quiet_poll_with_unchanged_data_does_not_redraw(config, bar_transport, claude_token):
+    register(bar_transport)
+    responses.get(USAGE_URL, json=usage_body())
+
+    Script([]).run(config)
 
     assert len(responses.calls) == 2
     assert len(draw_bodies(bar_transport)) == 1
@@ -754,81 +777,89 @@ def test_a_timeout_poll_with_unchanged_data_does_not_redraw(config, bar_transpor
 def test_a_press_during_a_retry_after_wait_redraws_from_the_cache_and_keeps_waiting(
     config, bar_transport, claude_token
 ):
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
+    register(bar_transport)
     responses.get(USAGE_URL, json=usage_body())
     responses.get(USAGE_URL, status=429, headers={"Retry-After": "600"})
-    listener = FakeListener(False, True)
+    script = Script([], [PRESS])
 
-    watch.watch_limits(config, interval=180, listener=listener)
+    script.run(config)
 
-    assert len(responses.calls) == 2  # the press fetched nothing
+    assert len(responses.calls) == len(script.waits)  # the press fetched nothing
     assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk"]
-    assert 179 < listener.timeouts[0] <= 180
-    assert 590 < listener.timeouts[2] <= 600  # the wait after the press is what is left of the Retry-After
+    assert script.waits == [180, 600, 600]  # a press neither shortens nor restarts the wait
 
 
 @responses.activate
 def test_a_press_before_the_first_successful_fetch_switches_the_view_the_next_fetch_draws(
     config, bar_transport, claude_token
 ):
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
+    register(bar_transport)
     responses.get(USAGE_URL, status=500)
     responses.get(USAGE_URL, json=usage_body())
 
-    watch.watch_limits(config, interval=180, listener=FakeListener(True, False))
+    Script([PRESS]).run(config)
 
-    assert len(responses.calls) == 2
     assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["wk"]
 
 
 @responses.activate
 def test_two_presses_around_a_failed_redraw_leave_the_display_consistent(config, bar_transport, claude_token):
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
+    register(bar_transport)
     responses.get(USAGE_URL, json=usage_body())
     bar_transport.add("POST", DRAW_PATH, status=401)  # the redraw for press one is refused
 
-    watch.watch_limits(config, interval=180, listener=FakeListener(True, True))
+    Script([PRESS, PRESS]).run(config)
 
     # Press two flips back to the view that is still on the bar, so nothing more is drawn.
     assert len(draw_bodies(bar_transport)) == 2
 
 
 @responses.activate
-def test_the_listener_is_started_and_stopped_even_on_interrupt(config, bar_transport, claude_token):
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
+def test_the_button_subscription_is_disposed_even_on_interrupt(config, bar_transport, claude_token):
+    register(bar_transport)
     responses.get(USAGE_URL, json=usage_body())
-    listener = FakeListener()
+    script = Script()
 
-    watch.watch_limits(config, interval=180, listener=listener)
+    script.run(config)
 
-    assert listener.started
-    assert listener.stopped
+    assert not script.buttons.observers
 
 
 @responses.activate
-def test_the_listener_is_stopped_when_a_rejected_token_ends_the_watch(config, bar_transport, claude_token):
-    bar_transport.add("DELETE", DRAW_PATH)
+def test_the_button_subscription_is_disposed_when_a_rejected_token_ends_the_watch(config, bar_transport, claude_token):
+    register(bar_transport, draws=False)
     responses.get(USAGE_URL, status=401)
-    listener = FakeListener()
+    script = Script()
 
     with pytest.raises(exceptions.ClaudeAuthError):
-        watch.watch_limits(config, interval=180, listener=listener)
+        script.run(config)
 
-    assert listener.stopped
+    assert not script.buttons.observers
 
 
 @responses.activate
-def test_an_injected_sleep_runs_without_creating_a_listener(config, bar_transport, claude_token, monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("a listener must not be created when sleep is injected")
+def test_without_an_injected_sleep_the_watch_listens_to_the_bars_start_button(
+    config, bar_transport, claude_token, monkeypatch
+):
+    script = Script([PRESS])
+    monkeypatch.setattr(watch.bar, "start_button_events", lambda received: script.buttons)
+    monkeypatch.setattr(watch.time, "sleep", script.sleep)
+    register(bar_transport)
+    responses.get(USAGE_URL, json=usage_body())
 
-    monkeypatch.setattr(watch.bar, "StartButtonListener", forbidden)
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
+    watch.watch_limits(config, interval=180)
+
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk"]
+    assert not script.buttons.observers
+
+
+@responses.activate
+def test_an_injected_sleep_alone_subscribes_to_nothing(config, bar_transport, claude_token, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the bar must not be listened to when sleep is injected")
+
+    monkeypatch.setattr(watch.bar, "start_button_events", forbidden)
+    register(bar_transport)
     responses.get(USAGE_URL, json=usage_body())
 
     def sleep(seconds):

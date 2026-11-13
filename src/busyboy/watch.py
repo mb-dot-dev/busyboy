@@ -4,8 +4,13 @@ from collections.abc import Callable
 import dataclasses
 from datetime import UTC, datetime, timedelta
 import logging
+import threading
 import time
 from typing import Literal
+
+from busylib.features.input_events import ButtonEvent
+from reactivex import Observable
+from reactivex import operators as ops
 
 from busyboy import bar, claude, exceptions, github
 from busyboy.config import BusyboyConfig
@@ -350,50 +355,55 @@ def watch_limits(
     *,
     interval: int = DEFAULT_LIMITS_INTERVAL_SECONDS,
     sleep: Callable[[float], None] | None = None,
-    listener: bar.ButtonListener | None = None,
+    buttons: Observable[ButtonEvent] | None = None,
 ) -> None:
     """
     Poll Claude's usage limits until interrupted, then clear the display.
 
-    One limit is shown at a time, the 5-hour one first. Each Start-button press on the bar switches to the
-    other and redraws at once from the usage already fetched. A press never fetches and never shortens the
-    wait: the wait is a deadline that presses are handled inside of, so the fetch cadence and any Retry-After
-    back-off are exactly what they would be without the button.
+    One limit is shown at a time, the 5-hour one first. The watch subscribes to the bar's button events
+    (`bar.start_button_events`) and each Start-button press switches to the other limit and redraws at once
+    from the usage already fetched. A press never fetches and never shortens the wait: the poll loop sleeps
+    exactly as it would without the button, so the fetch cadence and any Retry-After back-off are unchanged.
+
+    Button events arrive on the stream's own thread while the poll loop runs on the main one, so the two
+    share the displayed state under a lock.
 
     Like `watch`, it clears first (so nothing left by another busyboy invocation sits under the display)
     and clears again on any exit. There are no icons to upload.
 
-    `sleep`, when given, replaces the wait entirely (tests drive the loop with it) and no button listener is
-    created, so a press can never happen. Otherwise the wait uses the listener's `wait_for_press`.
-    `listener` is resolved here so tests can inject a fake.
+    `sleep`, when given, replaces the wait entirely (tests drive the loop with it) and, unless `buttons` is
+    also given, nothing subscribes to the bar, so a press can never happen. `buttons` is the seam tests use
+    to feed presses in without a bar.
     """
-    active = None if sleep is not None else listener if listener is not None else bar.StartButtonListener(config)
+    lock = threading.Lock()
     kind: LimitKind = "session"
     shown: LimitsScreen | None = None
 
     def step(_previous: LimitsScreen | None) -> TickResult[LimitsScreen]:
         nonlocal shown
-        result = limits_tick(config, shown, kind=kind)
-        shown = result.screen
+        with lock:
+            result = limits_tick(config, shown, kind=kind)
+            shown = result.screen
         return result
 
-    def pause(seconds: float) -> None:
+    def on_press(_event: ButtonEvent) -> None:
         nonlocal kind, shown
-        if active is None:
-            assert sleep is not None  # narrows the type: `active` is None only when `sleep` is given
-            sleep(seconds)
-            return
-        deadline = time.monotonic() + seconds
-        while (remaining := deadline - time.monotonic()) > 0 and active.wait_for_press(remaining):
+        with lock:
             kind = "weekly" if kind == "session" else "session"
             if shown is not None:
                 # `limits_tick` keeps the previous screen if the draw fails, so `shown` always matches the bar.
                 shown = limits_tick(config, shown, kind=kind, reuse_usage=True).screen
 
-    if active is not None:
-        active.start()
+    events = buttons if buttons is not None else None if sleep is not None else bar.start_button_events(config)
+    subscription = (
+        events.pipe(ops.filter(lambda event: event.is_press)).subscribe(
+            on_press, on_error=lambda error: LOGGER.debug("Button stream ended: %s", type(error).__name__)
+        )
+        if events is not None
+        else None
+    )
     try:
-        _poll(config, step, interval=interval, sleep=pause)
+        _poll(config, step, interval=interval, sleep=sleep)
     finally:
-        if active is not None:
-            active.stop()
+        if subscription is not None:
+            subscription.dispose()
