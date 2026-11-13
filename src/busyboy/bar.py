@@ -19,6 +19,11 @@ from busyboy.config import BusyboyConfig
 
 LOGGER = logging.getLogger(__name__)
 
+# busylib puts the API token in the status WebSocket's URL (`?x-api-token=...`) and `websockets` logs the request
+# line at DEBUG, which `--verbose` (root logger at DEBUG) would print. An explicit level on this logger wins over
+# the root's, so the token never reaches a log line, and the per-frame debug flood goes with it.
+logging.getLogger("websockets").setLevel(logging.INFO)
+
 APPLICATION_NAME = "busyboy"
 TEXT_ELEMENT_ID = "text"
 
@@ -504,13 +509,15 @@ class StartButtonListener:
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
-        self._task = loop.create_task(self._listen())
-        self._ready.set()
         try:
+            self._task = loop.create_task(self._listen())
+            self._ready.set()
             loop.run_until_complete(self._task)
         except asyncio.CancelledError:
             LOGGER.debug("Button listener stopped")
         finally:
+            self._ready.set()  # never leave `start()` waiting if setup itself failed
+            loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
 
     async def _listen(self) -> None:
@@ -525,6 +532,6 @@ class StartButtonListener:
                     ):
                         self._pressed.set()
             except Exception as error:  # noqa: BLE001 - nothing the stream does may reach the poll loop
-                LOGGER.debug("Button stream failed, retrying: %s", error)
+                LOGGER.debug("Button stream failed, retrying: %s", type(error).__name__)
             await asyncio.sleep(delay)
             delay = min(delay * 2, LISTENER_RETRY_MAX_SECONDS)

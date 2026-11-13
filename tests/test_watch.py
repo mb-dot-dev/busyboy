@@ -1,7 +1,6 @@
 """Tests for the workflow poll loop."""
 
 from datetime import UTC, datetime, timedelta
-import itertools
 import json
 import time
 
@@ -688,6 +687,7 @@ class FakeListener:
         self.results = list(results)
         self.started = False
         self.stopped = False
+        self.timeouts = []
 
     def start(self):
         self.started = True
@@ -696,6 +696,7 @@ class FakeListener:
         self.stopped = True
 
     def wait_for_press(self, timeout):
+        self.timeouts.append(timeout)
         if not self.results:
             raise KeyboardInterrupt
         return self.results.pop(0)
@@ -703,12 +704,6 @@ class FakeListener:
 
 def labels_drawn(bar_transport):
     return [label_of(body) for body in draw_bodies(bar_transport)]
-
-
-def clock(monkeypatch, *readings):
-    """Script `time.monotonic` for the watch: the given readings, then the last one forever."""
-    values = itertools.chain(readings, itertools.repeat(readings[-1]))
-    monkeypatch.setattr(watch.time, "monotonic", lambda: next(values))
 
 
 @responses.activate
@@ -737,19 +732,6 @@ def test_a_second_press_returns_to_the_five_hour_view(config, bar_transport, cla
 
 
 @responses.activate
-def test_a_press_after_the_interval_has_elapsed_fetches_again(config, bar_transport, claude_token, monkeypatch):
-    bar_transport.add("DELETE", DRAW_PATH)
-    bar_transport.add("POST", DRAW_PATH)
-    responses.get(USAGE_URL, json=usage_body())
-    clock(monkeypatch, 0, 1000)
-
-    watch.watch_limits(config, interval=180, listener=FakeListener(True))
-
-    assert len(responses.calls) == 2
-    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk"]
-
-
-@responses.activate
 def test_a_timeout_poll_with_unchanged_data_does_not_redraw(config, bar_transport, claude_token):
     bar_transport.add("DELETE", DRAW_PATH)
     bar_transport.add("POST", DRAW_PATH)
@@ -762,32 +744,49 @@ def test_a_timeout_poll_with_unchanged_data_does_not_redraw(config, bar_transpor
 
 
 @responses.activate
-def test_a_press_after_a_transient_failure_keeps_the_display_and_does_not_raise(
-    config, bar_transport, claude_token, monkeypatch
+def test_a_press_during_a_retry_after_wait_redraws_from_the_cache_and_keeps_waiting(
+    config, bar_transport, claude_token
 ):
     bar_transport.add("DELETE", DRAW_PATH)
     bar_transport.add("POST", DRAW_PATH)
     responses.get(USAGE_URL, json=usage_body())
-    responses.get(USAGE_URL, status=500)
-    clock(monkeypatch, 0, 1000)
+    responses.get(USAGE_URL, status=429, headers={"Retry-After": "600"})
+    listener = FakeListener(False, True)
 
-    watch.watch_limits(config, interval=180, listener=FakeListener(True))
+    watch.watch_limits(config, interval=180, listener=listener)
 
-    assert len(draw_bodies(bar_transport)) == 1
-    assert bar_transport.calls[-1].method == "DELETE"
+    assert len(responses.calls) == 2  # the press fetched nothing
+    assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["5h", "wk"]
+    assert 179 < listener.timeouts[0] <= 180
+    assert 590 < listener.timeouts[2] <= 600  # the wait after the press is what is left of the Retry-After
 
 
 @responses.activate
-def test_a_press_before_the_first_successful_fetch_fetches(config, bar_transport, claude_token):
+def test_a_press_before_the_first_successful_fetch_switches_the_view_the_next_fetch_draws(
+    config, bar_transport, claude_token
+):
     bar_transport.add("DELETE", DRAW_PATH)
     bar_transport.add("POST", DRAW_PATH)
     responses.get(USAGE_URL, status=500)
     responses.get(USAGE_URL, json=usage_body())
 
-    watch.watch_limits(config, interval=180, listener=FakeListener(True))
+    watch.watch_limits(config, interval=180, listener=FakeListener(True, False))
 
     assert len(responses.calls) == 2
     assert [label.split()[0] for label in labels_drawn(bar_transport)] == ["wk"]
+
+
+@responses.activate
+def test_two_presses_around_a_failed_redraw_leave_the_display_consistent(config, bar_transport, claude_token):
+    bar_transport.add("DELETE", DRAW_PATH)
+    bar_transport.add("POST", DRAW_PATH)
+    responses.get(USAGE_URL, json=usage_body())
+    bar_transport.add("POST", DRAW_PATH, status=401)  # the redraw for press one is refused
+
+    watch.watch_limits(config, interval=180, listener=FakeListener(True, True))
+
+    # Press two flips back to the view that is still on the bar, so nothing more is drawn.
+    assert len(draw_bodies(bar_transport)) == 2
 
 
 @responses.activate

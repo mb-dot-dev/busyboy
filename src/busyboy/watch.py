@@ -342,40 +342,40 @@ def watch_limits(
     """
     Poll Claude's usage limits until interrupted, then clear the display.
 
-    One limit is shown at a time, the 5-hour one first; each Start-button press on the bar switches to the
-    other and redraws at once from the usage already fetched, without a new API call. A fetch still happens
-    when `interval` seconds have passed since the last one, so presses cannot hold off fresh data.
+    One limit is shown at a time, the 5-hour one first. Each Start-button press on the bar switches to the
+    other and redraws at once from the usage already fetched. A press never fetches and never shortens the
+    wait: the wait is a deadline that presses are handled inside of, so the fetch cadence and any Retry-After
+    back-off are exactly what they would be without the button.
 
     Like `watch`, it clears first (so nothing left by another busyboy invocation sits under the display)
     and clears again on any exit. There are no icons to upload.
 
     `sleep`, when given, replaces the wait entirely (tests drive the loop with it) and no button listener is
-    created, so a press can never happen. Otherwise the wait is the listener's `wait_for_press`, which wakes
-    early on a press. `listener` is resolved here so tests can inject a fake.
+    created, so a press can never happen. Otherwise the wait uses the listener's `wait_for_press`.
+    `listener` is resolved here so tests can inject a fake.
     """
     active = None if sleep is not None else listener if listener is not None else bar.StartButtonListener(config)
     kind: LimitKind = "session"
-    pressed = False
-    last_fetch = 0.0
+    shown: LimitsScreen | None = None
+
+    def step(_previous: LimitsScreen | None) -> TickResult[LimitsScreen]:
+        nonlocal shown
+        result = limits_tick(config, shown, kind=kind)
+        shown = result.screen
+        return result
 
     def pause(seconds: float) -> None:
-        nonlocal kind, pressed
+        nonlocal kind, shown
         if active is None:
             assert sleep is not None  # narrows the type: `active` is None only when `sleep` is given
             sleep(seconds)
-            pressed = False
             return
-        pressed = active.wait_for_press(seconds)
-        if pressed:
+        deadline = time.monotonic() + seconds
+        while (remaining := deadline - time.monotonic()) > 0 and active.wait_for_press(remaining):
             kind = "weekly" if kind == "session" else "session"
-
-    def step(previous: LimitsScreen | None) -> TickResult[LimitsScreen]:
-        nonlocal last_fetch
-        reuse = pressed and previous is not None and time.monotonic() - last_fetch < interval
-        result = limits_tick(config, previous, kind=kind, reuse_usage=reuse)
-        if not reuse:
-            last_fetch = time.monotonic()
-        return result
+            if shown is not None:
+                # `limits_tick` keeps the previous screen if the draw fails, so `shown` always matches the bar.
+                shown = limits_tick(config, shown, kind=kind, reuse_usage=True).screen
 
     if active is not None:
         active.start()

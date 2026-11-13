@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import struct
 import time
 
@@ -502,3 +503,28 @@ def test_stop_returns_promptly_and_ends_the_thread(config):
     assert time.monotonic() - started < 1
     assert listener._thread is not None
     assert not listener._thread.is_alive()
+
+
+def test_websockets_request_logging_cannot_leak_the_token_under_verbose(caplog):
+    """busylib puts the token in the WebSocket URL and `websockets` logs the request line at DEBUG."""
+    caplog.set_level(logging.DEBUG)
+
+    logging.getLogger("websockets.client").debug("> GET /api/status/ws?x-api-token=SECRET HTTP/1.1")
+
+    assert "SECRET" not in caplog.text
+
+
+def test_a_failing_stream_is_logged_by_type_only(config, fast_retries, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    async def stream():
+        raise busylib_exceptions.BusyBarWebSocketError(
+            "failed for wss://bar/api/status/ws?x-api-token=SECRET", path="/api/status/ws", original=OSError("x")
+        )
+        yield {}
+
+    with bar.StartButtonListener(config, stream=stream) as listener:
+        listener.wait_for_press(0.1)
+
+    assert "BusyBarWebSocketError" in caplog.text
+    assert "SECRET" not in caplog.text

@@ -164,7 +164,7 @@ switches between the two and redraws at once; the choice is not persisted. A pre
 `--interval` seconds have passed since the last fetch. The button listener's failures (a dropped WebSocket)
 are retried quietly and never end the watch — the button just stops working until it reconnects. Startup resolves the Claude
 token and does one real usage fetch, so missing or expired credentials, an unreachable API, or an unexpected
-response print one line and exit 1; the loop then re-resolves it each
+response print one line and exit 1; the loop then re-resolves it on each fetch
 tick, swallows `ClaudeTransientError` and `BarError` (DEBUG only), and ends on `ClaudeAuthError`. The Claude
 token comes from the keychain, then `~/.claude/.credentials.json`, and is never printed or logged.
 
