@@ -1,16 +1,23 @@
 """Construction and delivery of BUSY Bar display payloads."""
 
+import asyncio
+from collections.abc import AsyncIterator, Callable, Mapping
 import dataclasses
 from importlib import resources
-from typing import Annotated, Literal, NoReturn, cast, get_args
+import logging
+import threading
+from typing import Annotated, Literal, NoReturn, Self, cast, get_args
 
 import busylib
 from busylib import exceptions as busylib_exceptions
+from busylib.features.input_events import ButtonEvent, input_events
 from pydantic import BaseModel, Field, field_validator
 from pydantic_extra_types.color import Color
 
 from busyboy import exceptions
 from busyboy.config import BusyboyConfig
+
+LOGGER = logging.getLogger(__name__)
 
 APPLICATION_NAME = "busyboy"
 TEXT_ELEMENT_ID = "text"
@@ -415,3 +422,99 @@ def upload_icons(config: BusyboyConfig) -> None:
         _reraise_as_bar_error(error)
     finally:
         client.close()
+
+
+LISTENER_RETRY_INITIAL_SECONDS = 1.0
+LISTENER_RETRY_MAX_SECONDS = 30.0
+LISTENER_STOP_TIMEOUT_SECONDS = 2.0
+
+type StatusStream = Callable[[], AsyncIterator[object]]
+
+
+async def _status_stream(config: BusyboyConfig) -> AsyncIterator[object]:
+    """Yield the bar's status messages over busylib's WebSocket, closing the client when the stream ends."""
+    client = busylib.AsyncBusyBar(config.host, token=config.token_value)
+    try:
+        async for message in client.stream_status_ws():
+            yield message
+    finally:
+        await client.aclose()
+
+
+class StartButtonListener:
+    """
+    Tell a synchronous caller when the bar's Start/Pause button is pressed.
+
+    busylib reports physical input only on its async status WebSocket, and busyboy's poll loops are synchronous,
+    so the stream is consumed on a daemon thread with its own event loop. A press sets a `threading.Event` that
+    `wait_for_press` waits on. The thread never raises into the caller: a dropped or failing stream is retried
+    with capped exponential backoff, and the button simply does nothing until it reconnects. `stream` is the
+    seam tests use in place of the real WebSocket.
+    """
+
+    def __init__(self, config: BusyboyConfig, *, stream: StatusStream | None = None) -> None:
+        self._stream: StatusStream = stream if stream is not None else lambda: _status_stream(config)
+        self._pressed = threading.Event()
+        self._ready = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        """Begin listening on a background thread; returns once the thread's loop is running."""
+        self._thread = threading.Thread(target=self._run, name="busyboy-start-button", daemon=True)
+        self._thread.start()
+        self._ready.wait()
+
+    def stop(self) -> None:
+        """Stop listening and wait briefly for the thread to end. Safe to call when never started."""
+        if self._thread is None:
+            return
+        if self._loop is not None and self._task is not None and not self._loop.is_closed():
+            try:
+                self._loop.call_soon_threadsafe(self._task.cancel)
+            except RuntimeError:
+                LOGGER.debug("Button listener loop was already closed")
+        self._thread.join(timeout=LISTENER_STOP_TIMEOUT_SECONDS)
+
+    def wait_for_press(self, timeout: float) -> bool:
+        """Block up to `timeout` seconds; return True, consuming the press, if Start was pressed meanwhile."""
+        if self._pressed.wait(timeout):
+            self._pressed.clear()
+            return True
+        return False
+
+    def __enter__(self) -> Self:
+        self.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.stop()
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        self._task = loop.create_task(self._listen())
+        self._ready.set()
+        try:
+            loop.run_until_complete(self._task)
+        except asyncio.CancelledError:
+            LOGGER.debug("Button listener stopped")
+        finally:
+            loop.close()
+
+    async def _listen(self) -> None:
+        delay = LISTENER_RETRY_INITIAL_SECONDS
+        while True:
+            try:
+                async for message in self._stream():
+                    delay = LISTENER_RETRY_INITIAL_SECONDS
+                    if isinstance(message, Mapping) and any(
+                        isinstance(event, ButtonEvent) and event.button == "start" and event.is_press
+                        for event in input_events(message)
+                    ):
+                        self._pressed.set()
+            except Exception as error:  # noqa: BLE001 - nothing the stream does may reach the poll loop
+                LOGGER.debug("Button stream failed, retrying: %s", error)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, LISTENER_RETRY_MAX_SECONDS)

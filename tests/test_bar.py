@@ -1,9 +1,11 @@
 """Tests for BUSY Bar payload construction and delivery."""
 
+import asyncio
 import json
 import struct
 import time
 
+from busylib import exceptions as busylib_exceptions
 import httpx2
 from pydantic import ValidationError
 import pytest
@@ -416,3 +418,87 @@ def test_payload_is_scoped_to_the_application():
     payload, _ = limits_elements(bar.LimitView("5h", 1))
 
     assert payload.application_name == bar.APPLICATION_NAME
+
+
+def button_message(button="START", action="PRESS"):
+    """A state message shaped the way busylib hands them out for a button update."""
+    return {"updates": [{"input": {"button_event": {"button": button, "action": action}}}]}
+
+
+def listener_with(config, *messages, gap=0.0):
+    """A listener over a fake status stream that yields `messages`, `gap` seconds apart, then ends."""
+
+    async def stream():
+        for index, message in enumerate(messages):
+            if index and gap:
+                await asyncio.sleep(gap)
+            yield message
+
+    return bar.StartButtonListener(config, stream=stream)
+
+
+@pytest.fixture
+def fast_retries(monkeypatch):
+    monkeypatch.setattr(bar, "LISTENER_RETRY_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(bar, "LISTENER_RETRY_MAX_SECONDS", 0.02)
+
+
+def test_a_start_press_wakes_wait_for_press(config, fast_retries):
+    with listener_with(config, button_message()) as listener:
+        assert listener.wait_for_press(2) is True
+
+
+def test_wait_for_press_times_out_with_false(config):
+    with listener_with(config) as listener:
+        assert listener.wait_for_press(0.05) is False
+
+
+def test_release_ok_and_back_are_ignored(config):
+    messages = [
+        button_message("START", "RELEASE"),
+        button_message("OK", "PRESS"),
+        button_message("BACK", "PRESS"),
+        {"updates": [{"input": {"switch_event": {"position": "APPS"}}}]},
+        {"updates": [{"input": {"encoder_event": {"delta": 2}}}]},
+        "a text frame",
+        {"updates": [{"frame": {}}]},
+    ]
+    with listener_with(config, *messages) as listener:
+        assert listener.wait_for_press(0.2) is False
+
+
+def test_two_presses_are_two_wakes(config, fast_retries):
+    with listener_with(config, button_message(), button_message(), gap=0.2) as listener:
+        assert listener.wait_for_press(2) is True
+        assert listener.wait_for_press(2) is True
+
+
+def test_a_stream_that_raises_is_retried_and_never_escapes(config, fast_retries):
+    attempts = []
+
+    async def stream():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise busylib_exceptions.BusyBarWebSocketError("dropped", path="/api/status/ws", original=OSError("reset"))
+        yield button_message()
+
+    with bar.StartButtonListener(config, stream=stream) as listener:
+        assert listener.wait_for_press(2) is True
+
+    assert len(attempts) >= 2
+
+
+def test_stop_returns_promptly_and_ends_the_thread(config):
+    async def stream():
+        await asyncio.Event().wait()
+        yield {}
+
+    listener = bar.StartButtonListener(config, stream=stream)
+    listener.start()
+    started = time.monotonic()
+
+    listener.stop()
+
+    assert time.monotonic() - started < 1
+    assert listener._thread is not None
+    assert not listener._thread.is_alive()
