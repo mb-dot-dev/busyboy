@@ -4,6 +4,7 @@ from importlib import metadata
 import json
 
 import pytest
+import reactivex as rx
 import responses
 from typer.testing import CliRunner
 
@@ -310,33 +311,23 @@ def test_a_git_failure_exits_one(monkeypatch):
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 
-class EndsAtTheFirstWait:
-    """A button listener that never connects and ends the watch at its first wait, the way Ctrl+C would."""
+def no_buttons(monkeypatch, *, interrupt_at_first_wait=True):
+    """Keep a limits watch off the real WebSocket; it ends at its first wait, as Ctrl+C would, unless told not to."""
+    monkeypatch.setattr(cli.watch.bar, "start_button_events", lambda config: rx.never())
+    if interrupt_at_first_wait:
 
-    def __init__(self, config):
-        pass
+        def interrupt(seconds):
+            raise KeyboardInterrupt
 
-    def start(self):
-        pass
-
-    def stop(self):
-        pass
-
-    def wait_for_press(self, timeout):
-        raise KeyboardInterrupt
-
-
-class NeverPressed(EndsAtTheFirstWait):
-    """A button listener whose waits time out at once, so the poll loop keeps ticking without sleeping."""
-
-    def wait_for_press(self, timeout):
-        return False
+        monkeypatch.setattr(cli.watch.time, "sleep", interrupt)
+    else:
+        monkeypatch.setattr(cli.watch.time, "sleep", lambda seconds: None)
 
 
 @pytest.fixture
 def claude_bar(bar_transport, monkeypatch):
     """Register a whole happy-path limits watch: a stand-in Claude token, the usage API, the bar, no real buttons."""
-    monkeypatch.setattr(cli.watch.bar, "StartButtonListener", EndsAtTheFirstWait)
+    no_buttons(monkeypatch)
     monkeypatch.setattr(cli.claude, "resolve_token", lambda: "claude-test-token")
     responses.add(
         responses.GET,
@@ -396,7 +387,7 @@ def test_a_token_rejected_mid_watch_exits_1_and_clears(bar_transport, monkeypatc
     responses.add(responses.GET, CLAUDE_USAGE_URL, status=401)  # the second tick, and every one after
     bar_transport.add("DELETE", DRAW_PATH)
     bar_transport.add("POST", DRAW_PATH)
-    monkeypatch.setattr(cli.watch.bar, "StartButtonListener", NeverPressed)
+    no_buttons(monkeypatch, interrupt_at_first_wait=False)
 
     result = CliRunner().invoke(cli.main, ["claude", "limits"], env=ENV)
 
